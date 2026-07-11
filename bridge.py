@@ -28,6 +28,7 @@ FPS = int(os.environ.get("FPS", "2"))
 # PIL images for the last few frames sent to owocr, so handle_ocr_result has an img
 _pil_deque: deque = deque(maxlen=3)
 _ocr_busy: bool = False  # True while owocr is processing a frame; gates sends to prevent backlog
+_latest_frame: bytes | None = None  # most recent raw JPEG; served by /debug/stream
 
 # Set in main() so the controller's sync send_result callback can schedule
 # coroutines back onto our event loop
@@ -91,9 +92,10 @@ def get_controller():
 
 
 def start_gsm_web_server():
+    import time as _time
     from GameSentenceMiner.util.config.configuration import get_config
     from GameSentenceMiner.web.texthooking_page import app, start_web_server
-    from flask import request, jsonify
+    from flask import request, jsonify, Response
 
     get_config().advanced.localhost_bind_address = "0.0.0.0"
 
@@ -103,6 +105,19 @@ def start_gsm_web_server():
         if forwarded_proto == "https":
             return jsonify({"port": 0}), 200
         return jsonify({"port": 7275}), 200
+
+    @app.route("/stream")
+    def _mjpeg_stream():
+        def _generate():
+            while True:
+                frame = _latest_frame
+                if frame:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                    )
+                _time.sleep(0.5)
+        return Response(_generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
     start_web_server()
 
@@ -148,17 +163,27 @@ async def bridge_loop():
 
                 async def receive_loop():
                     global _ocr_busy
-                    async for msg in ws:
-                        if msg in ("True", "False"):
-                            continue
-                        _ocr_busy = False  # owocr finished — next frame can be sent
-                        img = _pil_deque[-1] if _pil_deque else None
-                        ctrl.handle_ocr_result(
-                            text=msg,
-                            orig_text=[msg],
-                            time=datetime.now(),
-                            img=img,
-                        )
+                    try:
+                        async for msg in ws:
+                            if msg in ("True", "False"):
+                                continue
+                            _ocr_busy = False  # owocr finished — next frame can be sent
+                            img = _pil_deque[-1] if _pil_deque else None
+                            try:
+                                ctrl.handle_ocr_result(
+                                    text=msg,
+                                    orig_text=[msg],
+                                    time=datetime.now(),
+                                    img=img,
+                                )
+                            except Exception as exc:
+                                import traceback
+                                print(f"handle_ocr_result error: {exc}", flush=True)
+                                traceback.print_exc()
+                    except Exception as exc:
+                        import traceback
+                        print(f"receive_loop crashed: {exc}", flush=True)
+                        traceback.print_exc()
 
                 recv_task = asyncio.create_task(receive_loop())
                 frame_count = 0
@@ -167,10 +192,8 @@ async def bridge_loop():
                         connected = True
                         print("bridge: receiving frames", flush=True)
                     frame_count += 1
-                    if frame_count % 10 == 0:
-                        with open("/tmp/latest_frame.jpg", "wb") as f:
-                            f.write(jpeg)
-                    global _ocr_busy
+                    global _latest_frame, _ocr_busy
+                    _latest_frame = jpeg
                     # Skip if owocr is still processing the previous frame.
                     # Without this gate, frames pile up faster than Google Lens can
                     # process them (~1.4s/frame), causing ever-growing backlog and
