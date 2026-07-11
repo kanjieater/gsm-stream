@@ -91,11 +91,44 @@ def get_controller():
     return _controller
 
 
+async def mjpeg_server():
+    """Minimal MJPEG server on :7276 — bypasses GSM's proxying gateway."""
+    async def _handle(reader, writer):
+        try:
+            await reader.read(4096)  # consume the HTTP request
+        except Exception:
+            pass
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+            b"Cache-Control: no-cache\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+        )
+        try:
+            while True:
+                frame = _latest_frame
+                if frame:
+                    writer.write(
+                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                    )
+                    await writer.drain()
+                await asyncio.sleep(0.5)
+        except (ConnectionResetError, BrokenPipeError, Exception):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(_handle, "0.0.0.0", 7276)
+    print("MJPEG stream: http://192.168.1.21:7276/", flush=True)
+    async with server:
+        await server.serve_forever()
+
+
 def start_gsm_web_server():
-    import time as _time
     from GameSentenceMiner.util.config.configuration import get_config
     from GameSentenceMiner.web.texthooking_page import app, start_web_server
-    from flask import request, jsonify, Response
+    from flask import request, jsonify
 
     get_config().advanced.localhost_bind_address = "0.0.0.0"
 
@@ -105,19 +138,6 @@ def start_gsm_web_server():
         if forwarded_proto == "https":
             return jsonify({"port": 0}), 200
         return jsonify({"port": 7275}), 200
-
-    @app.route("/stream")
-    def _mjpeg_stream():
-        def _generate():
-            while True:
-                frame = _latest_frame
-                if frame:
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-                    )
-                _time.sleep(0.5)
-        return Response(_generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
     start_web_server()
 
@@ -237,7 +257,7 @@ async def main():
     # Warm up the controller (imports + instantiation) before the bridge loop
     get_controller()
 
-    await bridge_loop()
+    await asyncio.gather(mjpeg_server(), bridge_loop())
 
 
 if __name__ == "__main__":
