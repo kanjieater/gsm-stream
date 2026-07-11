@@ -6,7 +6,6 @@ Text intake goes through GSM's full pipeline:
   → gametext.handle_new_text_event (cross-source dedup, text processing, Anki, texthooker)
 """
 import asyncio
-import hashlib
 import os
 import sys
 import threading
@@ -28,8 +27,7 @@ FPS = int(os.environ.get("FPS", "2"))
 
 # PIL images for the last few frames sent to owocr, so handle_ocr_result has an img
 _pil_deque: deque = deque(maxlen=3)
-_last_frame_hash = ""
-_last_ocr_text: str | None = None  # last text received from owocr; replayed on same-hash frames
+_ocr_busy: bool = False  # True while owocr is processing a frame; gates sends to prevent backlog
 
 # Set in main() so the controller's sync send_result callback can schedule
 # coroutines back onto our event loop
@@ -149,11 +147,11 @@ async def bridge_loop():
                 ctrl = get_controller()
 
                 async def receive_loop():
-                    global _last_ocr_text
+                    global _ocr_busy
                     async for msg in ws:
                         if msg in ("True", "False"):
                             continue
-                        _last_ocr_text = msg
+                        _ocr_busy = False  # owocr finished — next frame can be sent
                         img = _pil_deque[-1] if _pil_deque else None
                         ctrl.handle_ocr_result(
                             text=msg,
@@ -172,21 +170,15 @@ async def bridge_loop():
                     if frame_count % 10 == 0:
                         with open("/tmp/latest_frame.jpg", "wb") as f:
                             f.write(jpeg)
-                    global _last_frame_hash
-                    h = hashlib.md5(jpeg).hexdigest()
-                    if h == _last_frame_hash:
-                        # Same frame — no point re-sending to owocr, but the controller
-                        # needs a second matching result to reach stable_frames=2.
-                        if _last_ocr_text:
-                            img = _pil_deque[-1] if _pil_deque else None
-                            ctrl.handle_ocr_result(
-                                text=_last_ocr_text,
-                                orig_text=[_last_ocr_text],
-                                time=datetime.now(),
-                                img=img,
-                            )
+                    global _ocr_busy
+                    # Skip if owocr is still processing the previous frame.
+                    # Without this gate, frames pile up faster than Google Lens can
+                    # process them (~1.4s/frame), causing ever-growing backlog and
+                    # 30s+ delays. Skipping here means the controller always sees
+                    # real, fresh OCR results — no replayed or faked frames.
+                    if _ocr_busy:
                         continue
-                    _last_frame_hash = h
+                    _ocr_busy = True
                     try:
                         _pil_deque.append(Image.open(BytesIO(jpeg)))
                     except Exception:
