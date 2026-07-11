@@ -1,32 +1,95 @@
 """
 Bridges SysDVR RTSP → owocr WebSocket (7331) → GSM texthooker page (7275).
-GSM's own web server serves the texthooker UI and handles all WebSocket clients.
+
+Text intake goes through GSM's full pipeline:
+  owocr (glens, first-pass) → TwoPassOCRControllerV2 (stabilization, 2+ matching frames)
+  → gametext.handle_new_text_event (cross-source dedup, text processing, Anki, texthooker)
 """
 import asyncio
 import hashlib
 import os
-import re
 import sys
-import uuid
+import threading
+from collections import deque
 from datetime import datetime
+from io import BytesIO
+
+# Tell GSM we're acting as the Electron host: skip OBS auto-launch, pystray tray icon,
+# and other desktop-only behaviour that doesn't apply in a headless container.
+os.environ.setdefault("GSM_ELECTRON", "1")
 
 import websockets
+from PIL import Image
 
 SWITCH_HOST = os.environ.get("SWITCH_HOST", "192.168.1.145")
-# SysDVR RTSP server is on port 6666 (from source: #define RTSP_PORT 6666)
 SWITCH_STREAM = os.environ.get("SWITCH_STREAM", f"rtsp://{SWITCH_HOST}:6666")
 OWOCR_WS = "ws://127.0.0.1:7331"
 FPS = int(os.environ.get("FPS", "2"))
 
-# Filters: skip lines matching copyright watermarks (handles fullwidth chars too)
-_WATERMARK_RE = re.compile(
-    r"HuneX|COMFORT|Game\s*Source|Licensed\s*to|©|＠|copyright",
-    re.IGNORECASE,
-)
-_BLANK_LINE = "ＢＬＡＮＫ＿ＬＩＮＥ"
+# PIL images for the last few frames sent to owocr, so handle_ocr_result has an img
+_pil_deque: deque = deque(maxlen=3)
+_last_frame_hash = ""
+_last_ocr_text: str | None = None  # last text received from owocr; replayed on same-hash frames
 
-# Only keep lines that contain at least one CJK character or meaningful content
-_HAS_CJK = re.compile(r"[　-鿿＀-￯]")
+# Set in main() so the controller's sync send_result callback can schedule
+# coroutines back onto our event loop
+_bridge_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _make_controller():
+    from GameSentenceMiner.ocr.gsm_ocr import (
+        TwoPassConfig,
+        TwoPassOCRControllerV2,
+        SecondPassResult,
+    )
+    from GameSentenceMiner.owocr.owocr.ocr_runtime import TextFiltering
+
+    cfg = TwoPassConfig(
+        two_pass_enabled=True,
+        ocr1_engine="glens",
+        ocr2_engine="glens",
+        language="ja",
+        duplicate_threshold=80,
+        change_threshold=20,
+    )
+    filtering = TextFiltering(lang="ja")
+
+    def _send(text, time, *, response_dict=None, source=None):
+        if not text or not _bridge_loop:
+            return
+        from GameSentenceMiner import gametext
+        print(f"OCR stable: {text!r}", flush=True)
+        asyncio.run_coroutine_threadsafe(
+            gametext.handle_new_text_event(
+                text,
+                time,
+                source="ocr",
+                source_display_name="GSM OCR",
+            ),
+            _bridge_loop,
+        )
+
+    def _second_ocr(img, last_result, filtering, engine, **kw):
+        # First pass is already glens — return its text as the confirmed result
+        text = "".join(item for item in (last_result or []) if item)
+        return SecondPassResult(text=text, orig_text=last_result or [])
+
+    return TwoPassOCRControllerV2(
+        config=cfg,
+        filtering=filtering,
+        send_result=_send,
+        run_second_ocr=_second_ocr,
+    )
+
+
+_controller: "TwoPassOCRControllerV2 | None" = None
+
+
+def get_controller():
+    global _controller
+    if _controller is None:
+        _controller = _make_controller()
+    return _controller
 
 
 def start_gsm_web_server():
@@ -34,12 +97,8 @@ def start_gsm_web_server():
     from GameSentenceMiner.web.texthooking_page import app, start_web_server
     from flask import request, jsonify
 
-    # Bind to all interfaces so NPM/external clients can reach the container
     get_config().advanced.localhost_bind_address = "0.0.0.0"
 
-    # When accessed through an HTTPS reverse proxy, return port 0 so the
-    # Svelte frontend uses window.location.port (the proxy port) instead of
-    # the raw container port 7275, which the browser can't reach directly.
     @app.route("/get_websocket_port", methods=["GET"])
     def _patched_ws_port():
         forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
@@ -48,38 +107,6 @@ def start_gsm_web_server():
         return jsonify({"port": 7275}), 200
 
     start_web_server()
-
-
-_last_frame_hash = ""
-_last_text = ""
-
-
-def _clean_ocr(raw: str) -> str:
-    """Extract only meaningful CJK lines, strip watermarks and noise."""
-    lines = [l.strip() for l in raw.splitlines()]
-    kept = []
-    for l in lines:
-        if not l or l == _BLANK_LINE:
-            continue
-        if _WATERMARK_RE.search(l):
-            continue
-        if not _HAS_CJK.search(l):
-            continue
-        kept.append(l)
-    return "\n".join(kept).strip()
-
-
-async def push_text(text: str):
-    from GameSentenceMiner.gametext import GameLine
-    from GameSentenceMiner.web.texthooking_page import add_event_to_texthooker
-    line = GameLine(
-        id=str(uuid.uuid4()),
-        text=text,
-        time=datetime.now(),
-        prev=None,
-        next=None,
-    )
-    await add_event_to_texthooker(line)
 
 
 async def read_frames(stdout):
@@ -119,18 +146,21 @@ async def bridge_loop():
         try:
             async with websockets.connect(OWOCR_WS, max_size=100_000_000) as ws:
                 print("bridge: connected to owocr :7331", flush=True)
+                ctrl = get_controller()
 
                 async def receive_loop():
-                    global _last_text
+                    global _last_ocr_text
                     async for msg in ws:
                         if msg in ("True", "False"):
                             continue
-                        clean = _clean_ocr(msg)
-                        if not clean or clean == _last_text:
-                            continue
-                        _last_text = clean
-                        print(f"OCR: {clean}", flush=True)
-                        await push_text(clean)
+                        _last_ocr_text = msg
+                        img = _pil_deque[-1] if _pil_deque else None
+                        ctrl.handle_ocr_result(
+                            text=msg,
+                            orig_text=[msg],
+                            time=datetime.now(),
+                            img=img,
+                        )
 
                 recv_task = asyncio.create_task(receive_loop())
                 frame_count = 0
@@ -142,12 +172,25 @@ async def bridge_loop():
                     if frame_count % 10 == 0:
                         with open("/tmp/latest_frame.jpg", "wb") as f:
                             f.write(jpeg)
-                    # Skip OCR if frame is identical to the last one sent
                     global _last_frame_hash
                     h = hashlib.md5(jpeg).hexdigest()
                     if h == _last_frame_hash:
+                        # Same frame — no point re-sending to owocr, but the controller
+                        # needs a second matching result to reach stable_frames=2.
+                        if _last_ocr_text:
+                            img = _pil_deque[-1] if _pil_deque else None
+                            ctrl.handle_ocr_result(
+                                text=_last_ocr_text,
+                                orig_text=[_last_ocr_text],
+                                time=datetime.now(),
+                                img=img,
+                            )
                         continue
                     _last_frame_hash = h
+                    try:
+                        _pil_deque.append(Image.open(BytesIO(jpeg)))
+                    except Exception:
+                        pass
                     await ws.send(jpeg)
                 recv_task.cancel()
 
@@ -160,16 +203,25 @@ async def bridge_loop():
                 pass
             await proc.wait()
 
-        # SysDVR only accepts one connection at a time — give it time to reset
         retry_delay = 5 if connected else 15
         print(f"retrying in {retry_delay}s...", flush=True)
         await asyncio.sleep(retry_delay)
 
 
 async def main():
-    import threading
+    global _bridge_loop
+    _bridge_loop = asyncio.get_event_loop()
+
+    # Import gametext early so its internal multiplex WS server starts before
+    # start_web_server() creates the 7275 gateway that proxies to it.
+    import GameSentenceMiner.gametext  # noqa: F401 — side-effect import
+
     threading.Thread(target=start_gsm_web_server, daemon=True).start()
     print("GSM web server starting on :7275", flush=True)
+
+    # Warm up the controller (imports + instantiation) before the bridge loop
+    get_controller()
+
     await bridge_loop()
 
 
