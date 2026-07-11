@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Switch Texthooker</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1a1a1a;
+    color: #e8e8e8;
+    font-family: 'Noto Sans JP', 'Hiragino Sans', sans-serif;
+    font-size: 1.3rem;
+    line-height: 1.7;
+    padding: 1rem;
+  }
+  #status {
+    font-size: 0.75rem;
+    color: #666;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #555; display: inline-block; }
+  #dot.connected { background: #4caf50; }
+  #dot.error { background: #f44336; }
+  #lines { display: flex; flex-direction: column; gap: 0.5rem; }
+  .line {
+    background: #252525;
+    border-left: 3px solid #444;
+    padding: 0.6rem 0.8rem;
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: all;
+    word-break: break-all;
+  }
+  .line:first-child { border-left-color: #6ea8fe; }
+  .line:hover { background: #2e2e2e; }
+  #clear-btn {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    background: #333;
+    color: #aaa;
+    border: 1px solid #555;
+    padding: 0.4rem 0.8rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+  #clear-btn:hover { background: #444; }
+</style>
+</head>
+<body>
+<div id="status"><span id="dot"></span><span id="status-text">Connecting…</span></div>
+<div id="lines"></div>
+<button id="clear-btn" onclick="document.getElementById('lines').innerHTML=''">Clear</button>
+<script>
+const dot = document.getElementById('dot');
+const statusText = document.getElementById('status-text');
+const linesEl = document.getElementById('lines');
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.hostname}:7275`);
+  ws.onopen = () => { dot.className = 'connected'; statusText.textContent = 'Connected'; };
+  ws.onmessage = (e) => {
+    const div = document.createElement('div');
+    div.className = 'line';
+    div.textContent = e.data;
+    linesEl.prepend(div);
+    while (linesEl.children.length > 100) linesEl.removeChild(linesEl.lastChild);
+  };
+  ws.onclose = () => { dot.className = 'error'; statusText.textContent = 'Disconnected — retrying…'; setTimeout(connect, 3000); };
+  ws.onerror = () => { dot.className = 'error'; };
+}
+connect();
+</script>
+</body>
+</html>
