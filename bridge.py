@@ -470,6 +470,26 @@ def _patch_gsm_replay():
     _anki_mod._is_anki_polling_allowed = lambda: True
 
 
+def _start_gsm_background_services():
+    """Start the two GSM background services that gsm.py normally launches."""
+    from GameSentenceMiner import anki as _anki_mod, replay_handler
+    from GameSentenceMiner.util.config.configuration import get_config
+    from watchdog.observers import Observer
+
+    # Replay file watcher — picks up GSM_*.mkv files written by _save_replay()
+    watch_dir = get_config().paths.folder_to_watch
+    os.makedirs(watch_dir, exist_ok=True)
+    extractor = replay_handler.ReplayAudioExtractor()
+    observer = Observer()
+    observer.schedule(replay_handler.ReplayFileWatcher(extractor), watch_dir, recursive=False)
+    observer.start()
+    print(f"[bridge] file watcher started: {watch_dir}", flush=True)
+
+    # Anki polling thread — detects new Yomitan cards and calls queue_card_for_processing()
+    _anki_mod.start_monitoring_anki()
+    print("[bridge] Anki monitor started", flush=True)
+
+
 def start_gsm_web_server():
     from GameSentenceMiner.util.config.configuration import get_config
     from GameSentenceMiner.web import register_routes
@@ -498,6 +518,8 @@ async def main():
 
     from GameSentenceMiner.util.cron.run_crons import cron_scheduler
     cron_scheduler.start()
+
+    _start_gsm_background_services()
 
     await asyncio.gather(mjpeg_server(), bridge_loop(SWITCH_STREAM))
 
