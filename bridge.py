@@ -464,6 +464,11 @@ def _patch_gsm_replay():
 
     _obs_mod.save_replay_buffer = _save_replay
 
+    # Unlock Anki card polling — normally gated on obs_service != None (OBS connected).
+    # With GSM_ELECTRON=1 obs_service is always None, so polling never starts without this.
+    import GameSentenceMiner.anki as _anki_mod
+    _anki_mod._is_anki_polling_allowed = lambda: True
+
 
 def start_gsm_web_server():
     from GameSentenceMiner.util.config.configuration import get_config
