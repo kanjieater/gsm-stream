@@ -54,7 +54,7 @@ Switch RTSP :6666
       → TwoPassOCRControllerV2.handle_ocr_result() (2+ stable frames → triggers pass 2)
           → _second_ocr callback → run_coroutine_threadsafe(_call_glens) → glens result
           → _send callback → run_coroutine_threadsafe → gametext.handle_new_text_event()
-  → GSM texthooker WebSocket clients at :7275 (gsm.<your-domain> via NPM)
+  → GSM texthooker WebSocket clients at :7275 (<your-gsm-domain> via NPM)
 
 owocr subprocess (--engine glens) on :7331 — only used for second-pass glens calls
 MJPEG debug stream on :7276
@@ -64,7 +64,7 @@ MJPEG debug stream on :7276
 - `GSM_ELECTRON=1` must be set before any GSM imports — skips pystray/OBS
 - Import `GameSentenceMiner.gametext` BEFORE calling `start_web_server()` — gametext starts the internal multiplex WS server that the web server proxies to
 - `get_config().advanced.localhost_bind_address = "0.0.0.0"` before `start_web_server()` — otherwise binds to 127.0.0.1 only
-- Override `/get_websocket_port` Flask route to return 0 when `X-Forwarded-Proto: https` — otherwise Svelte app tries `wss://gsm.<your-domain>:7275` and bypasses NPM
+- Override `/get_websocket_port` Flask route to return 0 when `X-Forwarded-Proto: https` — otherwise Svelte app tries `wss://<your-gsm-domain>:7275` and bypasses NPM
 - `_ctrl_lock` guards `ctrl.handle_ocr_result()` — executor threads can overlap, controller is not thread-safe
 - `_second_ocr` is a sync callback called from the executor thread — safe to block with `.result(timeout=12)` since it's not the event loop thread
 - `_call_glens` opens a fresh WS connection per second-pass call (avoids shared-state issues with the owocr glens subprocess)
@@ -75,6 +75,12 @@ cd /mnt/srv/gsm-stream
 docker compose build && docker compose up -d
 docker compose logs -f
 ```
+
+## Security
+**Never hardcode personal domains, subdomains, or private URLs in source files.**
+Use `<your-gsm-domain>` as a placeholder in docs. Real URLs belong in `profiles.yml`
+on the host (not committed) or in `.env` files — never in `.py`, `.md`, `.js`, or any
+file tracked by git. This applies to any `*.yourdomain.*` pattern.
 
 ## GitHub
 Private repo: `kanjieater/gsm-stream`

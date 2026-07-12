@@ -71,7 +71,7 @@ To use this approach, you'd need either:
 1. A browser-based canvas UI added to bridge.py (Flask route `/exclusion-config`)
 2. Or hand-edit the JSON files in the mounted volume
 
-The aiohttp gateway at port 7275 forwards all HTTP requests to Flask, so adding new Flask routes works and they're accessible at `gsm.<your-domain>/<route>` through NPM.
+The aiohttp gateway at port 7275 forwards all HTTP requests to Flask, so adding new Flask routes works and they're accessible at `<your-gsm-domain>/<route>` through NPM.
 
 ## Implementation sketch (if needed)
 
