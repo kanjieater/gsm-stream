@@ -43,6 +43,17 @@ _BRIDGE_JS_TEMPLATE = r"""
     return s;
   }
 
+  // When ui_defaults change in profiles.yml, wipe stale localStorage so new
+  // defaults take effect on any device without needing DevTools.
+  var DEFAULTS_VER = __DEFAULTS_VER__;
+  try {
+    if (localStorage.getItem('bannou-texthooker-__bridge_ver__') !== DEFAULTS_VER) {
+      var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith('bannou-texthooker-'); });
+      for (var i = 0; i < keys.length; i++) localStorage.removeItem(keys[i]);
+      localStorage.setItem('bannou-texthooker-__bridge_ver__', DEFAULTS_VER);
+    }
+  } catch(e) {}
+
   // Inject missing preset entries before Svelte initialises its stores.
   // This script runs as a regular <script> and therefore executes before the
   // deferred <script type="module"> Svelte bundle, so localStorage is set
@@ -79,6 +90,36 @@ _BRIDGE_JS_TEMPLATE = r"""
   var style = document.createElement('style');
   style.textContent = '@media (min-width:640px){select.w-48{display:block!important}}';
   document.head.appendChild(style);
+
+  // Stream preview panel — toggle with the camera button, polls /frame at ~2fps
+  (function() {
+    var visible = false;
+    var timer = null;
+    var panel = document.createElement('div');
+    panel.style.cssText = 'position:fixed;bottom:60px;right:12px;z-index:9999;display:none;background:#000;border:1px solid #444;border-radius:6px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.6)';
+    var img = document.createElement('img');
+    img.style.cssText = 'display:block;width:320px;height:auto';
+    panel.appendChild(img);
+    document.body.appendChild(panel);
+
+    function poll() {
+      if (!visible) return;
+      img.src = '/frame?' + Date.now();
+      timer = setTimeout(poll, 500);
+    }
+
+    var btn = document.createElement('button');
+    btn.title = 'Toggle stream preview';
+    btn.textContent = '📷';
+    btn.style.cssText = 'position:fixed;bottom:16px;right:12px;z-index:9999;font-size:20px;background:rgba(0,0,0,.5);border:1px solid #555;border-radius:6px;padding:4px 8px;cursor:pointer;color:#fff';
+    btn.onclick = function() {
+      visible = !visible;
+      panel.style.display = visible ? 'block' : 'none';
+      if (visible) poll();
+      else { clearTimeout(timer); timer = null; }
+    };
+    document.body.appendChild(btn);
+  })();
 
   function ensurePreset(name) {
     if (!name) return;
@@ -303,6 +344,18 @@ def _after_req(response):
     return response
 
 
+@_flask_app.route("/frame")
+def _current_frame():
+    import stream as _stream_mod
+    from flask import Response
+    frame = _stream_mod.latest_frame
+    if not frame:
+        return Response(status=204)
+    return Response(frame, mimetype="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
+
 @_flask_app.route("/set-game", methods=["POST"])
 def _set_game():
     name = (_freq.json or {}).get("name", "").strip()
@@ -318,10 +371,16 @@ def _bridge_sync_js():
     import json as _json
     data = _load_yml()
     profiles = sorted(data.get("profiles", []) or [])
-    ui_defaults = (data.get("defaults", {}) or {}).get("ui", {}) or {}
+    ui_defaults = dict((data.get("defaults", {}) or {}).get("ui", {}) or {})
+    ws_url = os.environ.get("TEXTHOOKER_WS_URL", "")
+    if ws_url:
+        ui_defaults["websocketUrl"] = ws_url
+    import hashlib as _hl
+    ver = _hl.md5(_json.dumps(ui_defaults, sort_keys=True).encode()).hexdigest()[:8]
     js = (_BRIDGE_JS_TEMPLATE
           .replace("__PROFILES__", _json.dumps(profiles))
-          .replace("__UI_DEFAULTS__", _json.dumps(ui_defaults)))
+          .replace("__UI_DEFAULTS__", _json.dumps(ui_defaults))
+          .replace("__DEFAULTS_VER__", _json.dumps(ver)))
     return _fResp(js, mimetype="application/javascript")
 
 
@@ -346,46 +405,62 @@ def _patch_gsm_replay():
                 pass
 
         line_ts   = getattr(line, "time", None)
-        jpeg      = (_s.get_frame_near(line_ts) if line_ts else None) or _s.latest_frame
         audio_seg = _s.get_audio_segment_near(line_ts) if line_ts else None
 
-        if jpeg is None:
+        # Prefer the on-disk HQ frame (q:v 1, no re-encode needed).
+        # Fall back to the pipe frame bytes if HQ isn't available yet.
+        hq_path  = _s.get_hq_frame_near(line_ts) if line_ts else None
+        pipe_frame = (_s.get_frame_near(line_ts) if line_ts else None) or _s.latest_frame
+
+        if hq_path is None and pipe_frame is None:
             print("replay: no frame available", flush=True)
             return
 
         watch_dir = get_config().paths.folder_to_watch
         os.makedirs(watch_dir, exist_ok=True)
         uid      = int(_time.time() * 1000)
-        jpg_tmp  = os.path.join(tempfile.gettempdir(), f"gsm_{uid}.jpg")
         mkv_path = os.path.join(watch_dir, f"GSM_{uid}.mkv")
 
-        with open(jpg_tmp, "wb") as f:
-            f.write(jpeg)
+        # Use HQ path directly; only write a temp file if falling back to pipe frame.
+        if hq_path:
+            jpg_src     = hq_path
+            cleanup_src = False
+        else:
+            jpg_src = os.path.join(tempfile.gettempdir(), f"gsm_{uid}.jpg")
+            with open(jpg_src, "wb") as f:
+                f.write(pipe_frame)
+            cleanup_src = True
+
         try:
+            # -c:v copy avoids a second JPEG encode — the buffered frame goes
+            # straight into the MKV container without quality loss.
             if audio_seg:
                 cmd = ["ffmpeg", "-y",
-                       "-loop", "1", "-i", jpg_tmp, "-i", audio_seg,
+                       "-loop", "1", "-framerate", "1", "-i", jpg_src,
+                       "-i", audio_seg,
                        "-t", str(CLIP_DURATION),
-                       "-map", "0:v", "-c:v", "mjpeg", "-q:v", "2",
+                       "-map", "0:v", "-c:v", "copy",
                        "-map", "1:a", "-c:a", "copy",
                        mkv_path]
             else:
                 cmd = ["ffmpeg", "-y",
-                       "-loop", "1", "-i", jpg_tmp,
+                       "-loop", "1", "-framerate", "1", "-i", jpg_src,
                        "-t", str(CLIP_DURATION),
-                       "-c:v", "mjpeg", "-q:v", "2", mkv_path]
+                       "-c:v", "copy", mkv_path]
             subprocess.run(cmd, capture_output=True, timeout=15)
             if line_ts:
                 t = line_ts.timestamp() + CLIP_DURATION
                 os.utime(mkv_path, (t, t))
-            print(f"replay: {mkv_path} audio={'yes' if audio_seg else 'no'}", flush=True)
+            src_label = "hq" if hq_path else "pipe"
+            print(f"replay: {mkv_path} src={src_label} audio={'yes' if audio_seg else 'no'}", flush=True)
         except Exception as e:
             print(f"replay: failed: {e}", flush=True)
         finally:
-            try:
-                os.unlink(jpg_tmp)
-            except OSError:
-                pass
+            if cleanup_src:
+                try:
+                    os.unlink(jpg_src)
+                except OSError:
+                    pass
 
     _obs_mod.save_replay_buffer = _save_replay
 

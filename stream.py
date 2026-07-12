@@ -1,5 +1,8 @@
 import asyncio
 import os
+import time
+import threading
+from collections import deque
 from datetime import datetime
 from io import BytesIO
 
@@ -12,7 +15,115 @@ from ocr import run_meikiocr_raw
 
 FPS = int(os.environ.get("FPS", "2"))
 
+REPLAY_BUFFER_SECS = int(os.environ.get("REPLAY_BUFFER_SECS", "120"))
+AUDIO_SEG_SECS     = 2
+AUDIO_SEG_DIR      = "/tmp/gsm_audio"
+HQ_FRAME_DIR       = "/tmp/gsm_hq"
+HQ_FRAME_FPS       = 1  # must match the fps= value in the ffmpeg HQ output
+
 latest_frame: bytes | None = None
+
+_replay_buffer: deque[tuple[datetime, bytes]] = deque()
+
+_seg_lock        = threading.Lock()
+_session_start:  datetime | None = None
+_session_id:     int | None      = None
+_last_prune_ts:  float           = 0.0
+
+
+def _new_session() -> tuple[int, str, str]:
+    """Reset per-session state, clear old files, return (sid, audio_pattern, hq_pattern)."""
+    global _session_start, _session_id
+    sid = int(time.time())
+    for d in (AUDIO_SEG_DIR, HQ_FRAME_DIR):
+        os.makedirs(d, exist_ok=True)
+        for f in os.listdir(d):
+            try:
+                os.unlink(os.path.join(d, f))
+            except OSError:
+                pass
+    with _seg_lock:
+        _session_id    = sid
+        _session_start = datetime.now()
+    audio_pattern = os.path.join(AUDIO_SEG_DIR, f"seg_{sid}_%06d.mka")
+    hq_pattern    = os.path.join(HQ_FRAME_DIR,   f"hq_{sid}_%06d.jpg")
+    return sid, audio_pattern, hq_pattern
+
+
+def _frame_path(directory: str, prefix: str, sid: int, n: int) -> str:
+    return os.path.join(directory, f"{prefix}_{sid}_{n:06d}.jpg")
+
+
+def _seg_path(sid: int, n: int) -> str:
+    return os.path.join(AUDIO_SEG_DIR, f"seg_{sid}_{n:06d}.mka")
+
+
+def get_frame_near(ts: datetime) -> bytes | None:
+    if not _replay_buffer:
+        return None
+    return min(_replay_buffer, key=lambda f: abs(f[0].timestamp() - ts.timestamp()))[1]
+
+
+def get_hq_frame_near(ts: datetime) -> str | None:
+    """Return path to the highest-quality on-disk frame closest to ts, or None."""
+    with _seg_lock:
+        start = _session_start
+        sid   = _session_id
+    if not start or sid is None:
+        return None
+    n = int((ts - start).total_seconds() * HQ_FRAME_FPS)
+    if n < 0:
+        return None
+    for i in (n, n - 1, n + 1):
+        if i < 0:
+            continue
+        path = _frame_path(HQ_FRAME_DIR, "hq", sid, i)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def get_audio_segment_near(ts: datetime) -> str | None:
+    with _seg_lock:
+        start = _session_start
+        sid   = _session_id
+    if not start or sid is None:
+        return None
+    n = int((ts - start).total_seconds() / AUDIO_SEG_SECS)
+    if n < 0:
+        return None
+    for i in (n, n - 1):
+        if i < 0:
+            continue
+        path = _seg_path(sid, i)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _prune_session_files(now: datetime) -> None:
+    with _seg_lock:
+        start = _session_start
+        sid   = _session_id
+    if not start or sid is None:
+        return
+    elapsed = (now - start).total_seconds()
+    # Prune audio segments
+    keep_segs  = REPLAY_BUFFER_SECS // AUDIO_SEG_SECS
+    current_n  = int(elapsed / AUDIO_SEG_SECS)
+    for i in range(max(0, current_n - keep_segs)):
+        try:
+            os.unlink(_seg_path(sid, i))
+        except OSError:
+            pass
+    # Prune HQ frames
+    keep_frames  = REPLAY_BUFFER_SECS * HQ_FRAME_FPS
+    current_hq_n = int(elapsed * HQ_FRAME_FPS)
+    for i in range(max(0, current_hq_n - keep_frames)):
+        try:
+            os.unlink(_frame_path(HQ_FRAME_DIR, "hq", sid, i))
+        except OSError:
+            pass
 
 
 def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
@@ -71,19 +182,30 @@ async def read_frames(stdout):
 
 
 async def bridge_loop(stream_url: str):
-    global latest_frame
-    cmd = [
-        "ffmpeg", "-loglevel", "warning",
-        "-rtsp_transport", "tcp",
-        "-i", stream_url,
-        "-an",
-        "-err_detect", "ignore_err",
-        "-vf", f"fps={FPS}",
-        "-f", "image2pipe", "-vcodec", "mjpeg", "-",
-    ]
+    global latest_frame, _last_prune_ts
     loop = asyncio.get_event_loop()
     while True:
+        sid, audio_pattern, hq_pattern = _new_session()
         print(f"ffmpeg: connecting to {stream_url}...", flush=True)
+        cmd = [
+            "ffmpeg", "-loglevel", "warning",
+            "-rtsp_transport", "tcp", "-i", stream_url,
+            # Output 1: OCR pipe — 2fps, moderate quality (OCR doesn't need max quality)
+            "-map", "0:v",
+            "-err_detect", "ignore_err",
+            "-vf", f"fps={FPS}",
+            "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "pipe:1",
+            # Output 2: HQ screenshot frames — 1fps, max quality, stored to disk
+            "-map", "0:v",
+            "-vf", f"fps={HQ_FRAME_FPS}",
+            "-vcodec", "mjpeg", "-q:v", "1",
+            hq_pattern,
+            # Output 3: Audio segments — copy codec, 2-second chunks
+            "-map", "0:a?", "-c:a", "copy",
+            "-f", "segment", "-segment_time", str(AUDIO_SEG_SECS),
+            "-reset_timestamps", "1",
+            audio_pattern,
+        ]
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
         connected = False
         try:
@@ -91,8 +213,16 @@ async def bridge_loop(stream_url: str):
                 if not connected:
                     connected = True
                     print(f"bridge [{stream_url}]: receiving frames", flush=True)
+                now          = datetime.now()
                 latest_frame = jpeg
-                loop.run_in_executor(None, handle_frame_in_thread, jpeg, datetime.now())
+                _replay_buffer.append((now, jpeg))
+                cutoff = now.timestamp() - REPLAY_BUFFER_SECS
+                while _replay_buffer and _replay_buffer[0][0].timestamp() < cutoff:
+                    _replay_buffer.popleft()
+                if now.timestamp() - _last_prune_ts > 10:
+                    _prune_session_files(now)
+                    _last_prune_ts = now.timestamp()
+                loop.run_in_executor(None, handle_frame_in_thread, jpeg, now)
         except Exception as e:
             print(f"bridge error [{stream_url}]: {e}", flush=True)
         finally:
