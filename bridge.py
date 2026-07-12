@@ -197,14 +197,9 @@ def _apply_anki_yml_to_profile(profile_dict: dict, anki_yml: dict) -> bool:
             changed = True
 
     fields = anki_yml.get("fields", {})
-    for yml_key, cfg_key in (("word", "word_field"), ("picture", "picture_field")):
-        if yml_key in fields and anki.get(cfg_key) != fields[yml_key]:
-            anki[cfg_key] = fields[yml_key]
-            changed = True
-
-    for yml_key, cfg_key in (("sentence", "sentence"), ("sentence_audio", "sentence_audio")):
+    for yml_key in ("word", "picture", "sentence", "sentence_audio"):
         if yml_key in fields:
-            obj = anki.setdefault(cfg_key, {})
+            obj = anki.setdefault(yml_key, {})
             if obj.get("name") != fields[yml_key]:
                 obj["name"] = fields[yml_key]
                 changed = True
