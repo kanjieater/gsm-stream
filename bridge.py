@@ -415,6 +415,18 @@ def _set_game():
     print(f"game identity set: {name!r}", flush=True)
     if name and name != "Default":
         _add_to_profiles_yml(name)
+    # Also switch GSM's internal active profile so card processing uses the right config
+    target = name or "Default"
+    try:
+        from GameSentenceMiner.util.config.configuration import get_master_config, switch_profile_and_save
+        m = get_master_config()
+        if m and target in m.configs:
+            switch_profile_and_save(target)
+            print(f"[bridge] GSM profile switched to {target!r}", flush=True)
+        elif m:
+            print(f"[bridge] profile {target!r} not in GSM configs — staying on {m.current_profile!r}", flush=True)
+    except Exception as e:
+        print(f"[bridge] GSM profile switch error: {e}", flush=True)
     return _fjson({"ok": True, "game": name or "(cleared)"})
 
 
