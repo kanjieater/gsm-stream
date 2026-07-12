@@ -191,18 +191,26 @@ def _apply_anki_yml_to_profile(profile_dict: dict, anki_yml: dict) -> bool:
     anki = profile_dict.setdefault("anki", {})
     changed = False
 
-    for flat_key in ("url", "note_type"):
+    for flat_key in ("url", "note_type", "show_update_confirmation_dialog_v2"):
         if flat_key in anki_yml and anki.get(flat_key) != anki_yml[flat_key]:
             anki[flat_key] = anki_yml[flat_key]
             changed = True
 
     fields = anki_yml.get("fields", {})
+    field_options = anki_yml.get("field_options", {})
     for yml_key in ("word", "picture", "sentence", "sentence_audio"):
         if yml_key in fields:
             obj = anki.setdefault(yml_key, {})
             if obj.get("name") != fields[yml_key]:
                 obj["name"] = fields[yml_key]
                 changed = True
+        opts = field_options.get(yml_key, {})
+        if opts:
+            obj = anki.setdefault(yml_key, {})
+            for opt_key, opt_val in opts.items():
+                if obj.get(opt_key) != opt_val:
+                    obj[opt_key] = opt_val
+                    changed = True
 
     return changed
 
