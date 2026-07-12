@@ -375,6 +375,15 @@ def _after_req(response):
             _add_to_profiles_yml(name)
             if ProfileSwitcher.create_profile(name):
                 _apply_profile_defaults(name)
+            anki_yml = _load_anki_yml()
+            if anki_yml:
+                from GameSentenceMiner.util.config.configuration import get_master_config, ProfileConfig
+                master = get_master_config()
+                if name in master.configs:
+                    pd = master.configs[name].to_dict()
+                    if _apply_anki_yml_to_profile(pd, anki_yml):
+                        master.configs[name] = ProfileConfig.from_dict(pd)
+                        master.save()
 
     # UI delete game → remove from profiles.yml + config.json
     title = getattr(_tls, "delete_title", None)
