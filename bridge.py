@@ -207,6 +207,7 @@ def _apply_anki_yml_to_profile(profile_dict: dict, anki_yml: dict) -> bool:
     return changed
 
 
+
 def _save_profiles_yml(profiles):
     data = _load_yml()
     data["profiles"] = sorted(profiles)
@@ -316,13 +317,12 @@ def _sync_profiles():
         anki_yml = _load_anki_yml()
         if anki_yml:
             dirty = False
-            for name in yml_profiles:
-                if name in master.configs:
-                    pd = master.configs[name].to_dict()
-                    if _apply_anki_yml_to_profile(pd, anki_yml):
-                        from GameSentenceMiner.util.config.configuration import ProfileConfig
-                        master.configs[name] = ProfileConfig.from_dict(pd)
-                        dirty = True
+            from GameSentenceMiner.util.config.configuration import ProfileConfig
+            for name in master.configs:
+                pd = master.configs[name].to_dict()
+                if _apply_anki_yml_to_profile(pd, anki_yml):
+                    master.configs[name] = ProfileConfig.from_dict(pd)
+                    dirty = True
             if dirty:
                 master.save()
                 print("[bridge] anki config synced from profiles.yml", flush=True)
