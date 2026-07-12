@@ -34,8 +34,9 @@ owocr inserts `ＢＬＡＮＫ＿ＬＩＮＥ` between dialogue text and waterma
 ## Code Organization
 Keep individual Python source files under 300 lines. Split by responsibility when a file approaches that limit. Current modules:
 - `identity.py` — game identity detection (runtime override → GAME_NAME env → GSM profile)
-- `text_filter.py` — watermark detection, owocr artifact stripping, speaker name splitting
+- `text_filter.py` — watermark detection, owocr artifact stripping, speaker name splitting (text-only fallback)
 - `noise_filter.py` — frequency-based UI noise suppression (meikiocr + glens history, per-game cache)
+- `speaker_filter.py` — positional speaker name classifier; learns speaker regions from bbox position + dialogue adjacency
 - `ocr.py` — raw meikiocr and glens OCR calls
 - `controller.py` — TwoPassOCRControllerV2 wiring, send/second-pass callbacks
 - `stream.py` — RTSP ingestion (ffmpeg), per-frame dispatch, MJPEG debug server

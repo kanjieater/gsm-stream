@@ -6,6 +6,7 @@ from io import BytesIO
 from PIL import Image
 
 import noise_filter
+import speaker_filter
 import controller as ctrl_module
 from ocr import run_meikiocr_raw
 
@@ -29,7 +30,13 @@ def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
 
     noise_filter.record_frame(raw, pil.height)
     filtered = noise_filter.filter_meiki_results(raw, pil.height)
-    text = "\n".join(r["text"] for r in filtered).strip()
+
+    speaker_filter.record_frame(filtered, pil.height, pil.width)
+    dialogue, speakers = speaker_filter.filter_speakers(filtered, pil.height, pil.width)
+    if speakers:
+        print(f"meiki speaker: {', '.join(r['text'].strip() for r in speakers)!r}", flush=True)
+
+    text = "\n".join(r["text"] for r in dialogue).strip()
     if not text:
         return
 
