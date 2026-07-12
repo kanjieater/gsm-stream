@@ -179,6 +179,39 @@ def _load_profiles_yml():
     return list(p) if isinstance(p, list) else []
 
 
+def _load_anki_yml() -> dict:
+    """Return the top-level 'anki' section from profiles.yml, or {}."""
+    return _load_yml().get("anki") or {}
+
+
+def _apply_anki_yml_to_profile(profile_dict: dict, anki_yml: dict) -> bool:
+    """Merge profiles.yml anki section into a profile dict. Returns True if anything changed."""
+    if not anki_yml:
+        return False
+    anki = profile_dict.setdefault("anki", {})
+    changed = False
+
+    for flat_key in ("url", "note_type"):
+        if flat_key in anki_yml and anki.get(flat_key) != anki_yml[flat_key]:
+            anki[flat_key] = anki_yml[flat_key]
+            changed = True
+
+    fields = anki_yml.get("fields", {})
+    for yml_key, cfg_key in (("word", "word_field"), ("picture", "picture_field")):
+        if yml_key in fields and anki.get(cfg_key) != fields[yml_key]:
+            anki[cfg_key] = fields[yml_key]
+            changed = True
+
+    for yml_key, cfg_key in (("sentence", "sentence"), ("sentence_audio", "sentence_audio")):
+        if yml_key in fields:
+            obj = anki.setdefault(cfg_key, {})
+            if obj.get("name") != fields[yml_key]:
+                obj["name"] = fields[yml_key]
+                changed = True
+
+    return changed
+
+
 def _save_profiles_yml(profiles):
     data = _load_yml()
     data["profiles"] = sorted(profiles)
@@ -283,6 +316,21 @@ def _sync_profiles():
         # Ensure DB has a game record for every yml profile
         for name in yml_profiles:
             GamesTable.get_or_create_by_name(name)
+
+        # Push anki config from profiles.yml into every profile (profiles.yml is authoritative)
+        anki_yml = _load_anki_yml()
+        if anki_yml:
+            dirty = False
+            for name in yml_profiles:
+                if name in master.configs:
+                    pd = master.configs[name].to_dict()
+                    if _apply_anki_yml_to_profile(pd, anki_yml):
+                        from GameSentenceMiner.util.config.configuration import ProfileConfig
+                        master.configs[name] = ProfileConfig.from_dict(pd)
+                        dirty = True
+            if dirty:
+                master.save()
+                print("[bridge] anki config synced from profiles.yml", flush=True)
 
     except Exception as e:
         print(f"[bridge] profile sync error: {e}", flush=True)
