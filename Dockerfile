@@ -9,10 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libgl1 libegl1 libdbus-1-3 libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir gamesentenceminer
+RUN pip install --no-cache-dir gamesentenceminer rapidfuzz
 
 WORKDIR /app
-COPY bridge.py entrypoint.sh index.html ./
+COPY *.py entrypoint.sh index.html ./
 RUN chmod +x entrypoint.sh
 
 EXPOSE 7275

@@ -11,21 +11,36 @@ Docker container that bridges Nintendo Switch gameplay (SysDVR RTSP) → OCR →
 - If something GSM does natively, find how to call it — don't rewrite it
 
 ## Two-Pass OCR Architecture
-GSM's intended two-pass design:
-- **Pass 1 (fast, local):** oneocr or screenai — stability detection across frames
-- **Pass 2 (accurate, cloud):** Google Lens — runs once on stable frame for final output
+GSM's intended two-pass design, implemented properly:
+- **Pass 1 (fast, local):** MeikiOCR via `SharedMeikiOCRModel.get_model()` — runs every frame for stability detection
+- **Pass 2 (accurate, cloud):** Google Lens via owocr WS :7331 — runs ONCE on confirmed-stable frame
 
-**Linux/Docker constraint:** OneOCR is Windows-only (WinDLL). On Linux the recommended first-pass engine is not available. Current workaround: single-pass Google Lens with the controller's stability gate (2 matching frames required before emit). This is suboptimal — investigate ScreenAI or other Linux-compatible local engines as a first-pass option.
+First pass runs in a thread executor (`loop.run_in_executor`), never blocking the event loop.
+Second pass (`_second_ocr` callback) blocks its executor thread with `run_coroutine_threadsafe(_call_glens(...), loop).result(timeout=12)`.
+Controller requires 2+ consecutive frames with ≥80% text similarity before triggering the second pass.
+
+## Watermark Handling
+owocr inserts `ＢＬＡＮＫ＿ＬＩＮＥ` between dialogue text and watermark regions.
+`_strip_owocr_artifacts()` splits on that marker and drops everything after — applied to BOTH first-pass (meikiocr) and second-pass (glens) results before they reach the controller or `SecondPassResult`.
 
 ## Key Engine Notes
-- Google Lens: best quality, cloud, works everywhere
-- OneOCR: Windows-only, fast, recommended first-pass — **not usable in Docker on Linux**
-- ScreenAI: local, may work on Linux (unconfirmed), alternative first-pass candidate
-- Do NOT use manga-ocr — it's manga-specific, not tuned for game text
+- MeikiOCR: local, fast, Linux-compatible, game text — **first pass**
+  - API: `SharedMeikiOCRModel.get_model().run_ocr(np.array(pil.convert("RGB")), punct_conf_factor=0.2)`
+  - Returns `list[{"text": str, "chars": [...]}]`
+- Google Lens: best quality, cloud — **second pass only** (rate-limited; only called on stable frames)
+- Do NOT use manga-ocr — manga-specific, not tuned for game text
+- OneOCR: Windows-only (WinDLL) — not usable in Docker on Linux
 
-## Files
-- `bridge.py` — main bridge: RTSP → owocr WebSocket → controller → gametext
-- `Dockerfile` — python:3.11-slim + ffmpeg + gamesentenceminer
+## Code Organization
+Keep individual Python source files under 300 lines. Split by responsibility when a file approaches that limit. Current modules:
+- `identity.py` — game identity detection (runtime override → GAME_NAME env → GSM profile)
+- `text_filter.py` — watermark detection, owocr artifact stripping, speaker name splitting
+- `noise_filter.py` — frequency-based UI noise suppression (meikiocr + glens history, per-game cache)
+- `ocr.py` — raw meikiocr and glens OCR calls
+- `controller.py` — TwoPassOCRControllerV2 wiring, send/second-pass callbacks
+- `stream.py` — RTSP ingestion (ffmpeg), per-frame dispatch, MJPEG debug server
+- `bridge.py` — env config, Flask route injection, GSM web server startup, `main()` entry point
+- `Dockerfile` — python:3.11-slim + ffmpeg + gamesentenceminer + rapidfuzz
 - `entrypoint.sh` — starts owocr subprocess then bridge.py
 - `compose.yml` at `/mnt/srv/gsm-stream/compose.yml`
 
@@ -33,11 +48,15 @@ GSM's intended two-pass design:
 ```
 Switch RTSP :6666
   → ffmpeg (subprocess) → JPEG frames
-  → _ocr_busy gate (1 frame in-flight at a time, prevents 30s backlog)
-  → owocr WebSocket :7331 (--engine glens subprocess)
-  → TwoPassOCRControllerV2.handle_ocr_result() (2 stable frames → flush)
-  → _send callback → asyncio.run_coroutine_threadsafe → gametext.handle_new_text_event()
+  → loop.run_in_executor → _handle_frame_in_thread (no event-loop blocking)
+      → meikiocr (local, fast) → text
+      → TwoPassOCRControllerV2.handle_ocr_result() (2+ stable frames → triggers pass 2)
+          → _second_ocr callback → run_coroutine_threadsafe(_call_glens) → glens result
+          → _send callback → run_coroutine_threadsafe → gametext.handle_new_text_event()
   → GSM texthooker WebSocket clients at :7275 (gsm.<your-domain> via NPM)
+
+owocr subprocess (--engine glens) on :7331 — only used for second-pass glens calls
+MJPEG debug stream on :7276
 ```
 
 ## Key Implementation Details
@@ -45,8 +64,9 @@ Switch RTSP :6666
 - Import `GameSentenceMiner.gametext` BEFORE calling `start_web_server()` — gametext starts the internal multiplex WS server that the web server proxies to
 - `get_config().advanced.localhost_bind_address = "0.0.0.0"` before `start_web_server()` — otherwise binds to 127.0.0.1 only
 - Override `/get_websocket_port` Flask route to return 0 when `X-Forwarded-Proto: https` — otherwise Svelte app tries `wss://gsm.<your-domain>:7275` and bypasses NPM
-- `_ocr_busy` flag: set True before `ws.send(jpeg)`, cleared to False in `receive_loop` when OCR text result arrives (not on True/False ACKs)
-- Controller `_send` callback uses `asyncio.run_coroutine_threadsafe(coro, _bridge_loop)` to schedule `handle_new_text_event` onto the bridge's event loop
+- `_ctrl_lock` guards `ctrl.handle_ocr_result()` — executor threads can overlap, controller is not thread-safe
+- `_second_ocr` is a sync callback called from the executor thread — safe to block with `.result(timeout=12)` since it's not the event loop thread
+- `_call_glens` opens a fresh WS connection per second-pass call (avoids shared-state issues with the owocr glens subprocess)
 
 ## Deploy
 ```bash
