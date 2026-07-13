@@ -496,7 +496,8 @@ def _set_game():
     # Also switch GSM's internal active profile so card processing uses the right config
     target = name or "Default"
     try:
-        from GameSentenceMiner.util.config.configuration import get_master_config, switch_profile_and_save
+        from GameSentenceMiner.util.config.configuration import get_master_config, switch_profile_and_save, gsm_state
+        gsm_state.current_game = target  # used by replay_handler for VAD output filenames
         m = get_master_config()
         if m and target in m.configs:
             switch_profile_and_save(target)
