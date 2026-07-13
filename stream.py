@@ -211,10 +211,17 @@ def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
         )
 
 
+FRAME_TIMEOUT_SECS = 30  # kill + retry if no frame data arrives within this window
+
+
 async def read_frames(stdout):
     buf = bytearray()
     while True:
-        chunk = await stdout.read(65536)
+        try:
+            chunk = await asyncio.wait_for(stdout.read(65536), timeout=FRAME_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            print(f"bridge: no frame data for {FRAME_TIMEOUT_SECS}s, reconnecting...", flush=True)
+            return
         if not chunk:
             break
         buf.extend(chunk)
