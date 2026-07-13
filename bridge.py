@@ -540,6 +540,28 @@ def _patch_gsm_replay():
     _anki_mod._is_anki_polling_allowed = lambda: True
 
 
+def _patch_gsm_text_normalization():
+    """Strip Yomitan furigana (漢字[よみ] → 漢字) before GSM's sentence comparison.
+
+    GSM's normalize_text_for_comparison strips bracket characters but leaves the
+    reading text inside, so 月[つき]の王[おう] normalises to 月つきの王おう rather than
+    月の王. This causes get_matching_line() to miss the OCR log entry and fall back to
+    last_line, giving completely wrong audio timing.
+    """
+    import re
+    import GameSentenceMiner.util.text_log as _tl
+    _orig = _tl.normalize_text_for_comparison
+    _furigana_re = re.compile(r'\[[^\]]*\]')
+
+    def _normalize_strip_furigana(text: str) -> str:
+        if text:
+            text = _furigana_re.sub('', text)
+        return _orig(text)
+
+    _tl.normalize_text_for_comparison = _normalize_strip_furigana
+    print("[bridge] GSM text normalization patched (furigana stripping enabled)", flush=True)
+
+
 def _start_gsm_background_services():
     """Start the two GSM background services that gsm.py normally launches."""
     from GameSentenceMiner import anki as _anki_mod, replay_handler
@@ -574,6 +596,7 @@ async def main():
 
     import GameSentenceMiner.gametext  # noqa: F401 — must import before start_web_server
     _patch_gsm_replay()
+    _patch_gsm_text_normalization()
 
     threading.Thread(target=start_gsm_web_server, daemon=True).start()
     print("GSM web server starting on :7275", flush=True)
