@@ -504,21 +504,21 @@ def _patch_gsm_replay():
             cleanup_src = True
 
         try:
-            # -c:v copy avoids a second JPEG encode — the buffered frame goes
-            # straight into the MKV container without quality loss.
+            # 30fps so GSM can seek to any timestamp within the clip.
+            # 1fps produced only 2 keyframes and seeks past 1.0s found nothing.
             if audio_seg:
                 cmd = ["ffmpeg", "-y",
-                       "-loop", "1", "-framerate", "1", "-i", jpg_src,
+                       "-loop", "1", "-framerate", "30", "-i", jpg_src,
                        "-i", audio_seg,
                        "-t", str(CLIP_DURATION),
-                       "-map", "0:v", "-c:v", "copy",
+                       "-map", "0:v", "-r", "30", "-c:v", "mjpeg", "-q:v", "3",
                        "-map", "1:a", "-c:a", "copy",
                        mkv_path]
             else:
                 cmd = ["ffmpeg", "-y",
-                       "-loop", "1", "-framerate", "1", "-i", jpg_src,
+                       "-loop", "1", "-framerate", "30", "-i", jpg_src,
                        "-t", str(CLIP_DURATION),
-                       "-c:v", "copy", mkv_path]
+                       "-r", "30", "-c:v", "mjpeg", "-q:v", "3", mkv_path]
             subprocess.run(cmd, capture_output=True, timeout=15)
             if line_ts:
                 t = line_ts.timestamp() + CLIP_DURATION
