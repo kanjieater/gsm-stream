@@ -677,6 +677,77 @@ def _patch_gsm_text_normalization():
     print("[bridge] GSM text normalization patched (furigana + multi-line scoring)", flush=True)
 
 
+def _patch_vad_similarity():
+    """Replace fuzz.ratio with partial_ratio in the VAD similarity gate.
+
+    GSM's _calculate_similarity uses fuzz.ratio(text_mined, transcript).  When
+    our OCR sends a single-sentence mined text but Whisper transcribes multiple
+    sentences (because beginning_offset gives it a 5s window), ratio() returns
+    ~26% even when the right sentence IS in the audio — punished by length diff.
+
+    partial_ratio finds the best-matching substring of transcript vs text_mined,
+    which is exactly the right question: "does the mined sentence appear in what
+    Whisper heard?"  We also clip segments to only those needed to cover the mined
+    text, so the audio doesn't span the next several lines of dialogue.
+    """
+    from GameSentenceMiner.vad import WhisperVADProcessor as _WVAP, DetectionResult
+    from GameSentenceMiner import mecab as _mecab
+    from rapidfuzz import fuzz as _rf_fuzz
+    import logging as _log
+
+    _vad_log = _log.getLogger("GameSentenceMiner.VAD")
+
+    @staticmethod
+    def _patched_calculate_similarity(text_mined: str, transcript: str) -> float:
+        if not text_mined or not transcript:
+            return 0.0
+        return _rf_fuzz.partial_ratio(
+            _mecab.to_hiragana(text_mined),
+            _mecab.to_hiragana(transcript),
+        )
+
+    _WVAP._calculate_similarity = _patched_calculate_similarity
+
+    _orig_detect = _WVAP._detect_voice_activity
+
+    def _detect_trim_to_match(self, input_audio, text_mined):
+        result = _orig_detect(self, input_audio, text_mined)
+        segs = result.segments
+        if not segs or not text_mined or len(segs) <= 1:
+            return result
+
+        # Find the minimum prefix of segments whose cumulative text best covers
+        # text_mined via partial_ratio, then stop growing once the score plateaus.
+        # This prevents capturing subsequent dialogue lines after the mined sentence.
+        mined_h = _mecab.to_hiragana(text_mined)
+        best_score = 0
+        best_end = 0
+        for i in range(len(segs)):
+            cum = "".join(s.text for s in segs[:i + 1])
+            score = _rf_fuzz.partial_ratio(mined_h, _mecab.to_hiragana(cum))
+            if score >= best_score:
+                best_score = score
+                best_end = i
+            if score < best_score - 15:
+                # Score dropped significantly — extra segments don't help
+                break
+
+        if best_end < len(segs) - 1:
+            _vad_log.info(
+                f"[bridge] VAD: clipped to {best_end + 1}/{len(segs)} segments "
+                f"(partial score {best_score:.0f} for '{text_mined[:20]}')"
+            )
+            result = DetectionResult(
+                segments=segs[:best_end + 1],
+                text_similarity=result.text_similarity,
+                transcript=result.transcript,
+            )
+        return result
+
+    _WVAP._detect_voice_activity = _detect_trim_to_match
+    print("[bridge] VAD similarity patched (partial_ratio + segment trimming)", flush=True)
+
+
 def _start_gsm_background_services():
     """Start the two GSM background services that gsm.py normally launches."""
     from GameSentenceMiner import anki as _anki_mod, replay_handler
@@ -696,8 +767,24 @@ def _start_gsm_background_services():
     _anki_mod.start_monitoring_anki()
     print("[bridge] Anki monitor started", flush=True)
 
+    # Restore current_game from the saved profile so VAD output filenames are valid
+    # even if the user hasn't re-selected the game in the texthooker UI after a restart.
+    try:
+        from GameSentenceMiner.util.config.configuration import get_master_config, gsm_state
+        m = get_master_config()
+        if m and m.current_profile and m.current_profile != "Default":
+            gsm_state.current_game = m.current_profile
+            print(f"[bridge] current_game restored: {m.current_profile!r}", flush=True)
+    except Exception as e:
+        print(f"[bridge] current_game restore error: {e}", flush=True)
+
     # VAD processor — GSM normally calls this in post_init_async(); we bypass that entrypoint
     from GameSentenceMiner.vad import vad_processor as _vad
+    import GameSentenceMiner.vad as _vad_module
+    # short_text_ratio is not a VAD dataclass field so getattr() always returns the module default.
+    # Patch it to 0 so multi-line OCR blocks (long text_mined) don't trigger false rejections.
+    _vad_module.SHORT_TEXT_RATIO_DEFAULT = 0
+    _patch_vad_similarity()
     _vad.init()
     print("[bridge] VAD processor initialized", flush=True)
 

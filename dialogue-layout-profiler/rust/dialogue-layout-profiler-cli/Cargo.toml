@@ -1,0 +1,15 @@
+[package]
+name = "dialogue-layout-profiler-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI and JSONL server for dialogue-layout-profiler."
+
+[[bin]]
+name = "dialogue-layout-profiler"
+path = "src/main.rs"
+
+[dependencies]
+dialogue-layout-profiler = { path = "../dialogue-layout-profiler" }
+serde = "1"
+serde_json = "1"
