@@ -258,6 +258,19 @@ def _apply_anki_yml_to_profile(profile_dict: dict, anki_yml: dict) -> bool:
     return changed
 
 
+def _apply_vad_yml_to_profile(profile_dict: dict, vad_yml: dict) -> bool:
+    """Merge profiles.yml vad section into a profile dict. Returns True if anything changed."""
+    if not vad_yml:
+        return False
+    vad = profile_dict.setdefault("vad", {})
+    changed = False
+    for k, v in vad_yml.items():
+        if vad.get(k) != v:
+            vad[k] = v
+            changed = True
+    return changed
+
+
 
 def _save_profiles_yml(profiles):
     data = _load_yml()
@@ -364,19 +377,22 @@ def _sync_profiles():
         for name in yml_profiles:
             GamesTable.get_or_create_by_name(name)
 
-        # Push anki config from profiles.yml into every profile (profiles.yml is authoritative)
+        # Push anki + vad config from profiles.yml into every profile (profiles.yml is authoritative)
         anki_yml = _load_anki_yml()
-        if anki_yml:
+        vad_yml  = _load_yml().get("vad") or {}
+        if anki_yml or vad_yml:
             dirty = False
             from GameSentenceMiner.util.config.configuration import ProfileConfig
             for name in master.configs:
                 pd = master.configs[name].to_dict()
-                if _apply_anki_yml_to_profile(pd, anki_yml):
+                changed = _apply_anki_yml_to_profile(pd, anki_yml)
+                changed |= _apply_vad_yml_to_profile(pd, vad_yml)
+                if changed:
                     master.configs[name] = ProfileConfig.from_dict(pd)
                     dirty = True
             if dirty:
                 master.save()
-                print("[bridge] anki config synced from profiles.yml", flush=True)
+                print("[bridge] anki+vad config synced from profiles.yml", flush=True)
 
     except Exception as e:
         print(f"[bridge] profile sync error: {e}", flush=True)
