@@ -40,17 +40,12 @@ def make_controller():
             print(f"OCR speaker: {speaker!r}", flush=True)
         out = dialogue or text
         print(f"OCR stable: {out!r}", flush=True)
-        # Send each line as a separate GSM event so get_matching_line() can find
-        # an exact match. Joining all lines into one GameLine causes fuzz.ratio()
-        # to score ~40% vs a short card sentence, losing to older exact matches.
-        lines = [l for l in out.split("\n") if l.strip()]
-        for line in lines:
-            asyncio.run_coroutine_threadsafe(
-                gametext.handle_new_text_event(
-                    line, ts, source="ocr", source_display_name="GSM OCR"
-                ),
-                bridge_loop,
-            )
+        asyncio.run_coroutine_threadsafe(
+            gametext.handle_new_text_event(
+                out, ts, source="ocr", source_display_name="GSM OCR"
+            ),
+            bridge_loop,
+        )
 
     def _second_ocr(img, last_result, filtering, engine, **kw):
         if img is None:

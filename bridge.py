@@ -92,19 +92,62 @@ _BRIDGE_JS_TEMPLATE = r"""
   document.head.appendChild(style);
 
   // Stream preview panel — toggle with the camera button, polls /frame at ~2fps
+  // Canvas overlay draws profiler bounding boxes: green=dialogue, red=ignored.
   (function() {
     var visible = false;
     var timer = null;
+
     var panel = document.createElement('div');
     panel.style.cssText = 'position:fixed;bottom:60px;right:12px;z-index:9999;display:none;background:#000;border:1px solid #444;border-radius:6px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.6)';
+
+    // Wrapper: relative so the absolute canvas sits on top of the image.
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'position:relative;line-height:0';
+
     var img = document.createElement('img');
     img.style.cssText = 'display:block;width:320px;height:auto';
-    panel.appendChild(img);
+
+    var cvs = document.createElement('canvas');
+    cvs.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
+
+    var lbl = document.createElement('div');
+    lbl.style.cssText = 'position:absolute;bottom:4px;left:4px;font:10px/1.3 monospace;color:#fff;background:rgba(0,0,0,.55);padding:2px 5px;border-radius:3px;pointer-events:none';
+
+    wrap.appendChild(img);
+    wrap.appendChild(cvs);
+    wrap.appendChild(lbl);
+    panel.appendChild(wrap);
     document.body.appendChild(panel);
+
+    function drawBoxes(data) {
+      cvs.width  = img.offsetWidth  || 320;
+      cvs.height = img.offsetHeight || 180;
+      var ctx = cvs.getContext('2d');
+      ctx.clearRect(0, 0, cvs.width, cvs.height);
+      if (!data || !data.prediction) { lbl.textContent = ''; return; }
+      var pred = data.prediction;
+      var fw = data.frame_width, fh = data.frame_height;
+      if (!fw || !fh) return;
+      var sx = cvs.width / fw, sy = cvs.height / fh;
+
+      function box(bbox, fill, stroke) {
+        var x = bbox[0]*sx, y = bbox[1]*sy, w = (bbox[2]-bbox[0])*sx, h = (bbox[3]-bbox[1])*sy;
+        ctx.fillStyle = fill;   ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.strokeRect(x, y, w, h);
+      }
+
+      (pred.ocr_regions     || []).forEach(function(r){ box(r.bbox,'rgba(34,220,90,.28)','rgba(34,220,90,.9)'); });
+      (pred.ignore_regions  || []).forEach(function(r){ box(r.bbox,'rgba(220,50,50,.28)','rgba(220,50,50,.9)'); });
+      (pred.speaker_regions || []).forEach(function(r){ box(r.bbox,'rgba(250,180,0,.28)','rgba(250,180,0,.9)'); });
+
+      var conf = pred.confidence != null ? (pred.confidence*100).toFixed(0)+'%' : '';
+      lbl.textContent = (pred.mode || '') + (conf ? '  ' + conf : '');
+    }
 
     function poll() {
       if (!visible) return;
       img.src = '/frame?' + Date.now();
+      fetch('/profiler-debug').then(function(r){ return r.ok ? r.json() : null; }).then(drawBoxes).catch(function(){ drawBoxes(null); });
       timer = setTimeout(poll, 500);
     }
 
@@ -415,6 +458,17 @@ def _current_frame():
                     headers={"Cache-Control": "no-store"})
 
 
+@_flask_app.route("/profiler-debug")
+def _profiler_debug():
+    import profiler_bridge as _pb
+    from flask import Response
+    data = _pb.get_debug_overlay()
+    if not data:
+        return Response(status=204)
+    return _fjson(data)
+
+
+
 
 @_flask_app.route("/set-game", methods=["POST"])
 def _set_game():
@@ -541,25 +595,53 @@ def _patch_gsm_replay():
 
 
 def _patch_gsm_text_normalization():
-    """Strip Yomitan furigana (漢字[よみ] → 漢字) before GSM's sentence comparison.
+    """Strip Yomitan furigana (漢字[よみ] → 漢字) before GSM's sentence comparison,
+    and fix _match_score() to check per-line within multi-line OCR GameLines.
 
-    GSM's normalize_text_for_comparison strips bracket characters but leaves the
-    reading text inside, so 月[つき]の王[おう] normalises to 月つきの王おう rather than
-    月の王. This causes get_matching_line() to miss the OCR log entry and fall back to
-    last_line, giving completely wrong audio timing.
+    Problem 1 — furigana: GSM's normalize_text_for_comparison strips bracket chars
+    but leaves the reading text inside, so 月[つき]の王[おう] → 月つきの王おう ≠ 月の王.
+
+    Problem 2 — multi-line scoring: our OCR sends all visible text as one GameLine
+    (e.g. "Line A\nLine B\nLine C"). The card sentence is one of those lines. But
+    fuzz.ratio("Line A Line B Line C", "Line A") ≈ 40%, so an older GameLine that
+    was just "Line A" wins with 100% — wrong timestamp. Fix: take the best per-line
+    score so the current multi-line GameLine scores as high as its best matching line.
     """
     import re
+    import rapidfuzz.fuzz
     import GameSentenceMiner.util.text_log as _tl
-    _orig = _tl.normalize_text_for_comparison
+
+    _orig_normalize = _tl.normalize_text_for_comparison
+    _orig_match_score = _tl._match_score
     _furigana_re = re.compile(r'\[[^\]]*\]')
 
     def _normalize_strip_furigana(text: str) -> str:
         if text:
             text = _furigana_re.sub('', text)
-        return _orig(text)
+        return _orig_normalize(text)
+
+    def _match_score_multiline(line_text: str, anki_sentence: str) -> float:
+        base = _orig_match_score(line_text, anki_sentence)
+        if '\n' not in line_text:
+            return base
+        anki_norm = _tl.normalize_text_for_comparison(anki_sentence)
+        if not anki_norm:
+            return base
+        best = base
+        for sub in line_text.split('\n'):
+            sub_norm = _tl.normalize_text_for_comparison(sub)
+            if not sub_norm:
+                continue
+            score = rapidfuzz.fuzz.ratio(sub_norm, anki_norm)
+            if score > best:
+                best = score
+                if best >= 100:
+                    break
+        return best
 
     _tl.normalize_text_for_comparison = _normalize_strip_furigana
-    print("[bridge] GSM text normalization patched (furigana stripping enabled)", flush=True)
+    _tl._match_score = _match_score_multiline
+    print("[bridge] GSM text normalization patched (furigana + multi-line scoring)", flush=True)
 
 
 def _start_gsm_background_services():
