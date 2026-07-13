@@ -3,7 +3,7 @@ import os
 import time
 import threading
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 
 from PIL import Image
@@ -81,6 +81,40 @@ def get_hq_frame_near(ts: datetime) -> str | None:
         if os.path.exists(path):
             return path
     return None
+
+
+REPLAY_BUILD_SECS = 30
+
+
+def get_audio_replay_buffer(end_time: datetime, duration_secs: int = REPLAY_BUILD_SECS) -> str | None:
+    """Concatenate audio segments covering [end_time − duration_secs, end_time].
+    Returns path to a combined .mka temp file, or None if no segments found."""
+    with _seg_lock:
+        start = _session_start
+        sid   = _session_id
+    if not start or sid is None:
+        return None
+
+    window_start = end_time - timedelta(seconds=duration_secs)
+    start_n = max(0, int((window_start - start).total_seconds() / AUDIO_SEG_SECS))
+    end_n   = int((end_time - start).total_seconds() / AUDIO_SEG_SECS)
+
+    segments = [p for n in range(start_n, end_n + 1)
+                if os.path.exists(p := _seg_path(sid, n))]
+    if not segments:
+        return None
+
+    import subprocess as _sp, tempfile as _tf
+    concat_list = os.path.join(_tf.gettempdir(), f"gsm_concat_{sid}_{end_n}.txt")
+    with open(concat_list, "w") as f:
+        for seg in segments:
+            f.write(f"file '{seg}'\n")
+
+    out = os.path.join(_tf.gettempdir(), f"gsm_replay_{sid}_{end_n}.mka")
+    r = _sp.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+                  "-c:a", "copy", out],
+                capture_output=True, timeout=30)
+    return out if r.returncode == 0 and os.path.exists(out) else None
 
 
 def get_audio_segment_near(ts: datetime) -> str | None:

@@ -460,8 +460,7 @@ def _patch_gsm_replay():
     import subprocess, tempfile, time as _time
     import GameSentenceMiner.obs as _obs_mod
     import stream as _s
-
-    CLIP_DURATION = 2
+    from datetime import datetime
 
     def _save_replay():
         from GameSentenceMiner.util.config.configuration import get_config, gsm_state
@@ -476,13 +475,14 @@ def _patch_gsm_replay():
             except Exception:
                 pass
 
-        line_ts   = getattr(line, "time", None)
-        audio_seg = _s.get_audio_segment_near(line_ts) if line_ts else None
+        line_ts = getattr(line, "time", None)
+        now     = datetime.now()
 
-        # Prefer the on-disk HQ frame (q:v 1, no re-encode needed).
-        # Fall back to the pipe frame bytes if HQ isn't available yet.
-        hq_path  = _s.get_hq_frame_near(line_ts) if line_ts else None
-        pipe_frame = (_s.get_frame_near(line_ts) if line_ts else None) or _s.latest_frame
+        # Build ~30s replay buffer ending at now — matches GSM's timing formula:
+        # total_seconds = file_length − (anki_card_creation_time − game_line.time)
+        audio_combined = _s.get_audio_replay_buffer(now)
+        hq_path        = _s.get_hq_frame_near(line_ts) if line_ts else None
+        pipe_frame     = (_s.get_frame_near(line_ts) if line_ts else None) or _s.latest_frame
 
         if hq_path is None and pipe_frame is None:
             print("replay: no frame available", flush=True)
@@ -490,13 +490,11 @@ def _patch_gsm_replay():
 
         watch_dir = get_config().paths.folder_to_watch
         os.makedirs(watch_dir, exist_ok=True)
-        uid      = int(_time.time() * 1000)
+        uid      = int(now.timestamp() * 1000)
         mkv_path = os.path.join(watch_dir, f"GSM_{uid}.mkv")
 
-        # Use HQ path directly; only write a temp file if falling back to pipe frame.
         if hq_path:
-            jpg_src     = hq_path
-            cleanup_src = False
+            jpg_src, cleanup_src = hq_path, False
         else:
             jpg_src = os.path.join(tempfile.gettempdir(), f"gsm_{uid}.jpg")
             with open(jpg_src, "wb") as f:
@@ -504,33 +502,33 @@ def _patch_gsm_replay():
             cleanup_src = True
 
         try:
-            # 30fps so GSM can seek to any timestamp within the clip.
-            # 1fps produced only 2 keyframes and seeks past 1.0s found nothing.
-            if audio_seg:
+            if audio_combined:
                 cmd = ["ffmpeg", "-y",
                        "-loop", "1", "-framerate", "30", "-i", jpg_src,
-                       "-i", audio_seg,
-                       "-t", str(CLIP_DURATION),
+                       "-i", audio_combined,
                        "-map", "0:v", "-r", "30", "-c:v", "mjpeg", "-q:v", "3",
                        "-map", "1:a", "-c:a", "copy",
+                       "-shortest",
                        mkv_path]
             else:
                 cmd = ["ffmpeg", "-y",
                        "-loop", "1", "-framerate", "30", "-i", jpg_src,
-                       "-t", str(CLIP_DURATION),
+                       "-t", "2",
                        "-r", "30", "-c:v", "mjpeg", "-q:v", "3", mkv_path]
-            subprocess.run(cmd, capture_output=True, timeout=15)
-            if line_ts:
-                t = line_ts.timestamp() + CLIP_DURATION
-                os.utime(mkv_path, (t, t))
+            subprocess.run(cmd, capture_output=True, timeout=30)
             src_label = "hq" if hq_path else "pipe"
-            print(f"replay: {mkv_path} src={src_label} audio={'yes' if audio_seg else 'no'}", flush=True)
+            print(f"replay: {mkv_path} src={src_label} audio={'yes' if audio_combined else 'no'}", flush=True)
         except Exception as e:
             print(f"replay: failed: {e}", flush=True)
         finally:
             if cleanup_src:
                 try:
                     os.unlink(jpg_src)
+                except OSError:
+                    pass
+            if audio_combined:
+                try:
+                    os.unlink(audio_combined)
                 except OSError:
                     pass
 
