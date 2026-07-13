@@ -271,6 +271,19 @@ def _apply_vad_yml_to_profile(profile_dict: dict, vad_yml: dict) -> bool:
     return changed
 
 
+def _apply_audio_yml_to_profile(profile_dict: dict, audio_yml: dict) -> bool:
+    """Merge profiles.yml audio section into a profile dict. Returns True if anything changed."""
+    if not audio_yml:
+        return False
+    audio = profile_dict.setdefault("audio", {})
+    changed = False
+    for k, v in audio_yml.items():
+        if audio.get(k) != v:
+            audio[k] = v
+            changed = True
+    return changed
+
+
 
 def _save_profiles_yml(profiles):
     data = _load_yml()
@@ -377,22 +390,25 @@ def _sync_profiles():
         for name in yml_profiles:
             GamesTable.get_or_create_by_name(name)
 
-        # Push anki + vad config from profiles.yml into every profile (profiles.yml is authoritative)
-        anki_yml = _load_anki_yml()
-        vad_yml  = _load_yml().get("vad") or {}
-        if anki_yml or vad_yml:
+        # Push anki + vad + audio config from profiles.yml into every profile (profiles.yml is authoritative)
+        _yml       = _load_yml()
+        anki_yml   = _load_anki_yml()
+        vad_yml    = _yml.get("vad") or {}
+        audio_yml  = _yml.get("audio") or {}
+        if anki_yml or vad_yml or audio_yml:
             dirty = False
             from GameSentenceMiner.util.config.configuration import ProfileConfig
             for name in master.configs:
                 pd = master.configs[name].to_dict()
                 changed = _apply_anki_yml_to_profile(pd, anki_yml)
                 changed |= _apply_vad_yml_to_profile(pd, vad_yml)
+                changed |= _apply_audio_yml_to_profile(pd, audio_yml)
                 if changed:
                     master.configs[name] = ProfileConfig.from_dict(pd)
                     dirty = True
             if dirty:
                 master.save()
-                print("[bridge] anki+vad config synced from profiles.yml", flush=True)
+                print("[bridge] anki+vad+audio config synced from profiles.yml", flush=True)
 
     except Exception as e:
         print(f"[bridge] profile sync error: {e}", flush=True)
