@@ -679,6 +679,11 @@ def _start_gsm_background_services():
     _anki_mod.start_monitoring_anki()
     print("[bridge] Anki monitor started", flush=True)
 
+    # VAD processor — GSM normally calls this in post_init_async(); we bypass that entrypoint
+    from GameSentenceMiner.vad import vad_processor as _vad
+    _vad.init()
+    print("[bridge] VAD processor initialized", flush=True)
+
 
 def start_gsm_web_server():
     from GameSentenceMiner.util.config.configuration import get_config

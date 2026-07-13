@@ -7,8 +7,10 @@ from datetime import datetime, timedelta
 from io import BytesIO
 
 from PIL import Image
+from rapidfuzz.distance import Levenshtein as _Lev
 
 import noise_filter
+import profiler_bridge
 import speaker_filter
 import controller as ctrl_module
 from ocr import run_meikiocr_raw
@@ -22,6 +24,7 @@ HQ_FRAME_DIR       = "/tmp/gsm_hq"
 HQ_FRAME_FPS       = 1  # must match the fps= value in the ffmpeg HQ output
 
 latest_frame: bytes | None = None
+_last_profiler_key: str = ""
 
 _replay_buffer: deque[tuple[datetime, bytes]] = deque()
 
@@ -83,7 +86,7 @@ def get_hq_frame_near(ts: datetime) -> str | None:
     return None
 
 
-REPLAY_BUILD_SECS = 30
+REPLAY_BUILD_SECS = 90
 
 
 def get_audio_replay_buffer(end_time: datetime, duration_secs: int = REPLAY_BUILD_SECS) -> str | None:
@@ -161,6 +164,7 @@ def _prune_session_files(now: datetime) -> None:
 
 
 def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
+    global _last_profiler_key
     try:
         pil = Image.open(BytesIO(jpeg))
     except Exception:
@@ -176,8 +180,20 @@ def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
     noise_filter.record_frame(raw, pil.height)
     filtered = noise_filter.filter_meiki_results(raw, pil.height)
 
-    speaker_filter.record_frame(filtered, pil.height, pil.width)
-    dialogue, speakers = speaker_filter.filter_speakers(filtered, pil.height, pil.width)
+    _profiler_key = "|".join(r.get("text", "") for r in filtered)
+    _changed = (
+        not _last_profiler_key
+        or not _profiler_key
+        or _Lev.normalized_similarity(_profiler_key, _last_profiler_key) < 0.92
+    )
+    if _changed:
+        _last_profiler_key = _profiler_key
+        profiler_bridge.observe(filtered, pil.width, pil.height, ts.timestamp())
+
+    region_filtered = profiler_bridge.filter_to_ocr_regions(filtered)
+
+    speaker_filter.record_frame(region_filtered, pil.height, pil.width)
+    dialogue, speakers = speaker_filter.filter_speakers(region_filtered, pil.height, pil.width)
     if speakers:
         print(f"meiki speaker: {', '.join(r['text'].strip() for r in speakers)!r}", flush=True)
 
@@ -191,7 +207,7 @@ def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
             text=text,
             orig_text=text.split("\n"),
             time=ts,
-            img=pil,
+            img=profiler_bridge.crop_to_ocr_regions(pil),
         )
 
 
