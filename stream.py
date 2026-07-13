@@ -17,7 +17,7 @@ from ocr import run_meikiocr_raw
 
 FPS = int(os.environ.get("FPS", "2"))
 
-REPLAY_BUFFER_SECS = int(os.environ.get("REPLAY_BUFFER_SECS", "120"))
+REPLAY_BUFFER_SECS = int(os.environ.get("REPLAY_BUFFER_SECS", "300"))
 AUDIO_SEG_SECS     = 2
 AUDIO_SEG_DIR      = "/tmp/gsm_audio"
 HQ_FRAME_DIR       = "/tmp/gsm_hq"
@@ -86,7 +86,7 @@ def get_hq_frame_near(ts: datetime) -> str | None:
     return None
 
 
-REPLAY_BUILD_SECS = 90
+REPLAY_BUILD_SECS = 300
 
 
 def get_audio_replay_buffer(end_time: datetime, duration_secs: int = REPLAY_BUILD_SECS) -> str | None:
