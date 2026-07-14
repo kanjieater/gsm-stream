@@ -728,17 +728,17 @@ def _patch_gsm_replay():
         try:
             if audio_combined:
                 cmd = ["ffmpeg", "-y",
-                       "-loop", "1", "-framerate", "30", "-i", jpg_src,
+                       "-loop", "1", "-framerate", "1", "-i", jpg_src,
                        "-i", audio_combined,
-                       "-map", "0:v", "-r", "30", "-c:v", "mjpeg", "-q:v", "3",
+                       "-map", "0:v", "-r", "1", "-c:v", "mjpeg", "-q:v", "1",
                        "-map", "1:a", "-c:a", "copy",
                        "-shortest",
                        mkv_path]
             else:
                 cmd = ["ffmpeg", "-y",
-                       "-loop", "1", "-framerate", "30", "-i", jpg_src,
+                       "-loop", "1", "-framerate", "1", "-i", jpg_src,
                        "-t", "2",
-                       "-r", "30", "-c:v", "mjpeg", "-q:v", "3", mkv_path]
+                       "-r", "1", "-c:v", "mjpeg", "-q:v", "1", mkv_path]
             subprocess.run(cmd, capture_output=True, timeout=30)
             src_label = "hq" if hq_path else "pipe"
             print(f"replay: {mkv_path} src={src_label} audio={'yes' if audio_combined else 'no'}", flush=True)

@@ -1,5 +1,6 @@
 audio:
   beginning_offset: -5.0
+  ffmpeg_reencode_options: '-c:a {encoder} -f {format} -af "afade=t=in:d=0.005"'
 
 vad:
   whisper_model: turbo
