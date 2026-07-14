@@ -1,9 +1,11 @@
 import asyncio
+import re
 import threading
 from io import BytesIO
 
 from PIL import Image
 
+import identity
 import noise_filter
 import text_filter
 from ocr import call_glens
@@ -39,6 +41,14 @@ def make_controller():
         if speaker:
             print(f"OCR speaker: {speaker!r}", flush=True)
         out = dialogue or text
+        _pat = identity.get_ocr_strip_pattern(identity.active_profile())
+        if _pat:
+            try:
+                out = re.sub(_pat, "", out, flags=re.UNICODE).strip()
+            except re.error:
+                pass
+        if not out:
+            return
         print(f"OCR stable: {out!r}", flush=True)
         asyncio.run_coroutine_threadsafe(
             gametext.handle_new_text_event(

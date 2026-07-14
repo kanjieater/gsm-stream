@@ -197,7 +197,7 @@ def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
     if speakers:
         print(f"meiki speaker: {', '.join(r['text'].strip() for r in speakers)!r}", flush=True)
 
-    text = "\n".join(r["text"] for r in dialogue).strip()
+    text = "".join(r["text"] for r in dialogue).strip()
     if not text:
         return
 
@@ -205,7 +205,7 @@ def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
     with ctrl_module._ctrl_lock:
         ctrl.handle_ocr_result(
             text=text,
-            orig_text=text.split("\n"),
+            orig_text=[text],
             time=ts,
             img=profiler_bridge.crop_to_ocr_regions(pil),
         )

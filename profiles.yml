@@ -1,0 +1,66 @@
+audio:
+  beginning_offset: -5.0
+
+vad:
+  whisper_model: turbo
+  trim_beginning: true
+  beginning_offset: -0.3
+  short_text_ratio: 0
+
+anki:
+  field_options:
+    sentence:
+      overwrite: false
+  fields:
+    picture: Image
+    sentence: Expression
+    sentence_audio: Audio
+    word: Vocab
+  note_type: Japanese
+  show_update_confirmation_dialog_v2: false
+  url: http://<anki-connect-host>:8765
+
+defaults:
+  text_processing:
+    remove_non_japanese: true
+  ui:
+    adjustTimerOnAfk: true
+    afkTimer: 120
+    allowNewLineDuringPause: true
+    allowPasteDuringPause: true
+    autoStartTimerDuringPause: true
+    autoStartTimerDuringPausePaste: true
+    autoTranslateLines: false
+    continuousReconnect: true
+    customCSS: |
+      input[placeholder="TL"] { display: none !important; }
+    enableExternalClipboardMonitor: true
+    enableLineAnimation: true
+    enablePaste: true
+    filterNonCJKLines: false
+    fontSize: 24
+    maxLines: 1000000
+    persistLines: true
+    persistStats: true
+    preventGlobalDuplicate: true
+    showAudioButton: false
+    showCharacterCount: true
+    showLineCount: true
+    showPresetQuickSwitch: true
+    showSpeed: true
+    showTimer: true
+    theme: business
+    trimAudioWithVAD: true
+    websocketUrl: wss://<your-gsm-domain>/ws/texthooker
+
+profiles: []
+
+# Per-game server-side OCR noise filter.
+# ocr_strip is a Python regex applied to every OCR line before it reaches GSM stats.
+# The match is replaced with "" and the result is stripped. Affects character count.
+#
+# Example:
+# game_overrides:
+#   'My Game Title':
+#     ocr_strip: "some noise pattern$"
+game_overrides: {}

@@ -44,7 +44,8 @@ _BRIDGE_JS_TEMPLATE = r"""
   }
 
   // When ui_defaults change in profiles.yml, wipe stale localStorage so new
-  // defaults take effect on any device without needing DevTools.
+  // defaults take effect. Cache-Control: no-store on bridge-sync.js ensures the
+  // browser always fetches the current hash.
   var DEFAULTS_VER = __DEFAULTS_VER__;
   try {
     if (localStorage.getItem('bannou-texthooker-__bridge_ver__') !== DEFAULTS_VER) {
@@ -85,11 +86,125 @@ _BRIDGE_JS_TEMPLATE = r"""
   // Always force the quick-switch dropdown visible.
   localStorage.setItem('bannou-texthooker-showPresetQuickSwitch', '1');
 
-  // Svelte updates the DOM before writing to localStorage, so intercept at the
-  // DOM level: inject CSS that wins over sm:hidden on the preset select.
+  // Inject CSS for things that don't need !important fights (layout, hiding TL input, etc.)
   var style = document.createElement('style');
-  style.textContent = '@media (min-width:640px){select.w-48{display:block!important}}';
+  style.textContent = 'select.w-48{display:block!important}' +
+    (UI_DEFAULTS.customCSS ? '\n' + UI_DEFAULTS.customCSS : '');
   document.head.appendChild(style);
+
+  // Touch-friendly fixes via inline setProperty — beats Svelte's scoped !important rules.
+  //
+  // Root cause: the <header> is `position:fixed; top:0; right:0` with no explicit width.
+  // On mobile its content overflows to the LEFT and becomes invisible.
+  // Fix: extend the header to full viewport width, allow wrapping, push the timer text
+  // (which is the first element) to its own second row below the buttons.
+  function _fixHeader(header) {
+    if (header._gsmFixed) return;
+    header._gsmFixed = true;
+    header.style.setProperty('left',            '0',           'important');
+    header.style.setProperty('right',           '0',           'important');
+    header.style.setProperty('width',           '100%',        'important');
+    header.style.setProperty('flex-wrap',       'wrap',        'important');
+    header.style.setProperty('justify-content', 'flex-start',  'important');
+    header.style.setProperty('align-items',     'center',      'important');
+    header.style.setProperty('overflow',        'visible',     'important');
+  }
+  function _touch44(el) {
+    el.style.setProperty('min-height', '44px', 'important');
+    el.style.setProperty('min-width',  '44px', 'important');
+  }
+  function _fixNode(el) {
+    if (!el || !el.nodeType || el.nodeType !== 1) return;
+    var tag = el.tagName && el.tagName.toUpperCase();
+    var parentTag = el.parentElement && el.parentElement.tagName && el.parentElement.tagName.toUpperCase();
+    if (tag === 'HEADER') {
+      _fixHeader(el);
+    }
+    // Standard button / role="button" divs
+    if (tag === 'BUTTON' || el.getAttribute('role') === 'button') {
+      _touch44(el);
+      el.style.setProperty('display',      'inline-flex', 'important');
+      el.style.setProperty('align-items',  'center',      'important');
+      el.querySelectorAll && el.querySelectorAll('svg').forEach(function(svg) {
+        svg.style.setProperty('width',  '22px', 'important');
+        svg.style.setProperty('height', '22px', 'important');
+      });
+    }
+    // Settings icon: bare <svg> directly inside <header> (not wrapped in a div)
+    if (tag === 'SVG' && parentTag === 'HEADER') {
+      _touch44(el);
+      el.style.setProperty('padding',     '10px',        'important');
+      el.style.setProperty('box-sizing',  'border-box',  'important');
+      el.style.setProperty('cursor',      'pointer',     'important');
+      el.style.setProperty('flex-shrink', '0',           'important');
+    }
+    // Connection indicator: <div> with no role in the header (wraps the connection SVG)
+    if (tag === 'DIV' && parentTag === 'HEADER' && !el.getAttribute('role')) {
+      _touch44(el);
+      el.style.setProperty('display',         'inline-flex', 'important');
+      el.style.setProperty('align-items',     'center',      'important');
+      el.style.setProperty('justify-content', 'center',      'important');
+      el.style.setProperty('flex-shrink',     '0',           'important');
+    }
+    if (el.classList && el.classList.contains('hide-on-mobile')) {
+      el.style.setProperty('display', 'inline-flex', 'important');
+    }
+    // Profile quick-switch select
+    if (tag === 'SELECT' && el.classList && el.classList.contains('w-48')) {
+      el.style.setProperty('display',     'block',   'important');
+      el.style.setProperty('height',      '44px',    'important');
+      el.style.setProperty('margin',      '0 10px',  'important');
+      el.style.setProperty('flex-shrink', '0',       'important');
+    }
+    // .timer: stats string — flex:1 so it fills remaining space on the current row;
+    // if it wraps alone to the next row it naturally spans the full width.
+    if (el.classList && el.classList.contains('timer')) {
+      el.style.setProperty('flex',        '1 1 auto',     'important');
+      el.style.setProperty('min-width',   '0',            'important');
+      el.style.setProperty('order',       '999',          'important');
+      el.style.setProperty('text-align',  'left',         'important');
+      el.style.setProperty('min-height',  '44px',         'important');
+      el.style.setProperty('line-height', '44px',         'important');
+      el.style.setProperty('padding',     '0 10px',       'important');
+      el.style.setProperty('font-size',   '1.25rem',      'important');
+    }
+  }
+  var _SEL = 'header, button, [role="button"], .hide-on-mobile, .timer, select.w-48';
+  function _fixAll() {
+    document.querySelectorAll(_SEL).forEach(_fixNode);
+    // Also catch bare SVGs and unroled divs in header
+    var h = document.querySelector('header');
+    if (h) {
+      Array.prototype.forEach.call(h.children, _fixNode);
+    }
+  }
+  function _fixAdded(mutations) {
+    mutations.forEach(function(m) {
+      m.addedNodes.forEach(function(node) {
+        if (!node || node.nodeType !== 1) return;
+        _fixNode(node);
+        if (node.querySelectorAll) {
+          node.querySelectorAll(_SEL).forEach(_fixNode);
+        }
+        // If the header itself was added, fix its direct children too
+        if (node.tagName && node.tagName.toUpperCase() === 'HEADER') {
+          Array.prototype.forEach.call(node.children, _fixNode);
+        }
+      });
+    });
+  }
+  function _initFixes() {
+    _fixAll();
+    new MutationObserver(_fixAdded).observe(document.body, {childList: true, subtree: true});
+    // Retry after Svelte has had time to render
+    setTimeout(_fixAll, 400);
+    setTimeout(_fixAll, 1200);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _initFixes);
+  } else {
+    _initFixes();
+  }
 
   // Stream preview panel — toggle with the camera button, polls /frame at ~2fps
   // Canvas overlay draws profiler bounding boxes: green=dialogue, red=ignored.
@@ -98,14 +213,14 @@ _BRIDGE_JS_TEMPLATE = r"""
     var timer = null;
 
     var panel = document.createElement('div');
-    panel.style.cssText = 'position:fixed;bottom:60px;right:12px;z-index:9999;display:none;background:#000;border:1px solid #444;border-radius:6px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.6)';
+    panel.style.cssText = 'position:fixed;top:155px;left:8px;right:8px;z-index:9999;display:none;background:#000;border:1px solid #444;border-radius:6px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.6)';
 
     // Wrapper: relative so the absolute canvas sits on top of the image.
     var wrap = document.createElement('div');
     wrap.style.cssText = 'position:relative;line-height:0';
 
     var img = document.createElement('img');
-    img.style.cssText = 'display:block;width:320px;height:auto';
+    img.style.cssText = 'display:block;width:100%;height:auto';
 
     var cvs = document.createElement('canvas');
     cvs.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
@@ -154,14 +269,32 @@ _BRIDGE_JS_TEMPLATE = r"""
     var btn = document.createElement('button');
     btn.title = 'Toggle stream preview';
     btn.textContent = '📷';
-    btn.style.cssText = 'position:fixed;bottom:16px;right:12px;z-index:9999;font-size:20px;background:rgba(0,0,0,.5);border:1px solid #555;border-radius:6px;padding:4px 8px;cursor:pointer;color:#fff';
+    btn.style.cssText = 'font-size:22px;background:none;border:none;cursor:pointer;min-height:44px;min-width:44px;padding:0;display:inline-flex;align-items:center;justify-content:center;color:inherit;flex-shrink:0;';
     btn.onclick = function() {
       visible = !visible;
       panel.style.display = visible ? 'block' : 'none';
       if (visible) poll();
       else { clearTimeout(timer); timer = null; }
     };
-    document.body.appendChild(btn);
+    // Insert into header right after the last bare SVG (settings icon), before the profile select.
+    function _insertCameraBtn() {
+      var header = document.querySelector('header');
+      if (!header) { setTimeout(_insertCameraBtn, 200); return; }
+      var svgs = Array.prototype.filter.call(header.children, function(c) {
+        return c.tagName && c.tagName.toUpperCase() === 'SVG';
+      });
+      var anchor = svgs.length ? svgs[svgs.length - 1] : null;
+      if (anchor && anchor.nextSibling) {
+        header.insertBefore(btn, anchor.nextSibling);
+      } else {
+        header.appendChild(btn);
+      }
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function() { setTimeout(_insertCameraBtn, 600); });
+    } else {
+      setTimeout(_insertCameraBtn, 600);
+    }
   })();
 
   function ensurePreset(name) {
@@ -196,6 +329,7 @@ _BRIDGE_JS_TEMPLATE = r"""
     _orig(key, value);
     if (key === 'bannou-texthooker-lastSettingPreset') notifyGame(value);
   };
+
 })();
 """
 
@@ -502,6 +636,8 @@ def _profiler_debug():
 
 
 
+
+
 @_flask_app.route("/set-game", methods=["POST"])
 def _set_game():
     name = (_freq.json or {}).get("name", "").strip()
@@ -540,7 +676,8 @@ def _bridge_sync_js():
           .replace("__PROFILES__", _json.dumps(profiles))
           .replace("__UI_DEFAULTS__", _json.dumps(ui_defaults))
           .replace("__DEFAULTS_VER__", _json.dumps(ver)))
-    return _fResp(js, mimetype="application/javascript")
+    return _fResp(js, mimetype="application/javascript",
+                  headers={"Cache-Control": "no-store"})
 
 
 def _patch_gsm_replay():
