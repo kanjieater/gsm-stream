@@ -18,19 +18,20 @@
       'header .timer{order:-1!important;margin-right:auto!important;flex:0 1 auto!important;min-width:0!important}' +
     '}' +
 
-    // 44px touch targets for all interactive elements in header
+    // 44px touch targets for all interactive elements in header; center icon within the box
     'header [role="button"],header button{' +
       'min-height:44px!important;min-width:44px!important;' +
-      'display:inline-flex!important;align-items:center!important}' +
+      'display:inline-flex!important;align-items:center!important;justify-content:center!important}' +
 
     // Settings gear: bare SVG direct child of header
     'header>svg{min-height:44px!important;min-width:44px!important;' +
       'padding:10px!important;box-sizing:border-box!important;' +
       'cursor:pointer!important;flex-shrink:0!important}' +
 
-    // Timer sizing
+    // Timer sizing — display:flex so justify-content works against Svelte's centering
     'header .timer{text-align:left!important;min-height:44px!important;' +
-      'line-height:44px!important;padding:0 10px!important;font-size:1.25rem!important}' +
+      'line-height:44px!important;padding:0 10px!important;font-size:1.25rem!important;' +
+      'display:flex!important;align-items:center!important;justify-content:flex-start!important}' +
 
     // Show preset select (GSM hides it on mobile via .hide-on-mobile)
     'select.w-48{display:block!important;height:44px!important;' +
@@ -46,6 +47,20 @@
     '{display:none!important}';
 
   document.head.appendChild(style);
+
+  // ── Timer left-align (inline — Svelte's scoped !important beats stylesheet) ──
+  function _fixTimer() {
+    var timer = document.querySelector('header .timer');
+    if (!timer) return;
+    timer.style.setProperty('display', 'flex', 'important');
+    timer.style.setProperty('align-items', 'center', 'important');
+    timer.style.setProperty('justify-content', 'flex-start', 'important');
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() { setTimeout(_fixTimer, 300); });
+  } else {
+    setTimeout(_fixTimer, 300);
+  }
 
   // ── Settings panel positioning ───────────────────────────────────────────────
   // Svelte sets .overscroll-contain { top: 44px } based on a plain 44px header.
