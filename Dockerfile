@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir gamesentenceminer rapidfuzz
 
 WORKDIR /app
-COPY *.py entrypoint.sh index.html ./
+COPY . .
 RUN chmod +x entrypoint.sh
 
 EXPOSE 7275
