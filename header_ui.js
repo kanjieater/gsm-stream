@@ -5,7 +5,7 @@
   style.textContent =
     // Full-width header, no clip on absolute settings panel
     'header{left:0!important;right:0!important;width:100%!important;' +
-      'align-items:center!important;overflow:visible!important}' +
+      'align-items:center!important;overflow:visible!important;z-index:50!important}' +
 
     // Mobile: buttons row 1, timer full-width row 2
     '@media(max-width:799px){' +
