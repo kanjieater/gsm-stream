@@ -33,10 +33,7 @@ ENABLED = os.environ.get("LAYOUT_PROFILER_ENABLED", "0") == "1"
 # Toggle at runtime via the /profiler-filter endpoint.
 _filter_enabled: bool = os.environ.get("LAYOUT_PROFILER_FILTER", "1") == "1"
 
-PROFILER_DIR = os.environ.get(
-    "LAYOUT_PROFILER_DIR",
-    "/home/ke/code/gsm-stream/dialogue-layout-profiler",
-)
+PROFILER_DIR = os.environ.get("LAYOUT_PROFILER_DIR", "/dialogue-layout-profiler")
 # If set, run this binary directly instead of via `docker run`.
 # Inside the gsm-stream container, set this to the mounted binary path.
 PROFILER_BIN = os.environ.get("LAYOUT_PROFILER_BIN", "")

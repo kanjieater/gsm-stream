@@ -37,11 +37,6 @@
       'margin:0 6px!important;flex-shrink:0!important}' +
     'header .hide-on-mobile{display:inline-flex!important}' +
 
-    // Settings panel uses justify-content:flex-end, which packs content upward.
-    // When content > container height, early items overflow ABOVE the visible area.
-    // Force flex-start so content starts at the top and overflow goes below (scrollable).
-    '.overscroll-contain{justify-content:flex-start!important}' +
-
     // Hide header buttons the user doesn't need
     'header [role="button"][title="Undo last Action"],' +
     'header [role="button"][title="Delete last Line"],' +
@@ -63,6 +58,9 @@
     if (!header) return;
     var h = Math.ceil(header.getBoundingClientRect().height);
     panel.style.setProperty('top', h + 'px', 'important');
+    // Svelte's scoped !important beats a stylesheet !important of lower specificity.
+    // Inline !important always wins — apply here instead of via CSS rule.
+    panel.style.setProperty('justify-content', 'flex-start', 'important');
   }
 
   function _checkMutations(mutations) {

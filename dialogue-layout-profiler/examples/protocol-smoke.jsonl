@@ -1,3 +1,0 @@
-{"type":"observe_frame","frame":{"frame_id":"resume-001","timestamp_ms":1000,"frame":{"width":1920,"height":1080},"regions":[{"id":"dialogue","bbox":[420,760,1510,940],"text":"hello","confidence":0.94}]}}
-{"type":"export_profile"}
-{"type":"shutdown"}
