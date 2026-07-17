@@ -24,7 +24,15 @@ from GameSentenceMiner.web.texthooking_page import app as _flask_app
 from flask import request as _freq, jsonify as _fjson, Response as _fResp
 import identity
 
-_SCRIPT_TAG = b'<script src="/bridge-sync.js"></script>'
+import hashlib as _hashlib
+import pathlib as _pathlib
+_HUI_VER = _hashlib.md5(
+    (_pathlib.Path(__file__).with_name("header_ui.js")).read_bytes()
+).hexdigest()[:8]
+_SCRIPT_TAG = (
+    b'<script src="/bridge-sync.js"></script>'
+    b'<script src="/header-ui.js?v=' + _HUI_VER.encode() + b'"></script>'
+)
 
 # __PROFILES__ and __UI_DEFAULTS__ are replaced at serve time with JSON literals.
 # filterNonCJKLines is the one preset settings key without a $ suffix in the Svelte bundle.
@@ -86,216 +94,13 @@ _BRIDGE_JS_TEMPLATE = r"""
   // Always force the quick-switch dropdown visible.
   localStorage.setItem('bannou-texthooker-showPresetQuickSwitch', '1');
 
-  // Inject CSS for things that don't need !important fights (layout, hiding TL input, etc.)
-  var style = document.createElement('style');
-  style.textContent = 'select.w-48{display:block!important}' +
-    (UI_DEFAULTS.customCSS ? '\n' + UI_DEFAULTS.customCSS : '');
-  document.head.appendChild(style);
-
-  // Touch-friendly fixes via inline setProperty — beats Svelte's scoped !important rules.
-  //
-  // Root cause: the <header> is `position:fixed; top:0; right:0` with no explicit width.
-  // On mobile its content overflows to the LEFT and becomes invisible.
-  // Fix: extend the header to full viewport width, allow wrapping, push the timer text
-  // (which is the first element) to its own second row below the buttons.
-  function _fixHeader(header) {
-    if (header._gsmFixed) return;
-    header._gsmFixed = true;
-    header.style.setProperty('left',            '0',           'important');
-    header.style.setProperty('right',           '0',           'important');
-    header.style.setProperty('width',           '100%',        'important');
-    header.style.setProperty('flex-wrap',       'wrap',        'important');
-    header.style.setProperty('justify-content', 'flex-start',  'important');
-    header.style.setProperty('align-items',     'center',      'important');
-    header.style.setProperty('overflow',        'visible',     'important');
+  // Inject customCSS from profiles.yml — needs runtime UI_DEFAULTS value.
+  // All static layout/fix CSS lives in header-ui.js (served separately).
+  if (UI_DEFAULTS.customCSS) {
+    var style = document.createElement('style');
+    style.textContent = UI_DEFAULTS.customCSS;
+    document.head.appendChild(style);
   }
-  function _touch44(el) {
-    el.style.setProperty('min-height', '44px', 'important');
-    el.style.setProperty('min-width',  '44px', 'important');
-  }
-  function _fixNode(el) {
-    if (!el || !el.nodeType || el.nodeType !== 1) return;
-    var tag = el.tagName && el.tagName.toUpperCase();
-    var parentTag = el.parentElement && el.parentElement.tagName && el.parentElement.tagName.toUpperCase();
-    if (tag === 'HEADER') {
-      _fixHeader(el);
-    }
-    // Standard button / role="button" divs
-    if (tag === 'BUTTON' || el.getAttribute('role') === 'button') {
-      _touch44(el);
-      el.style.setProperty('display',      'inline-flex', 'important');
-      el.style.setProperty('align-items',  'center',      'important');
-      el.querySelectorAll && el.querySelectorAll('svg').forEach(function(svg) {
-        svg.style.setProperty('width',  '22px', 'important');
-        svg.style.setProperty('height', '22px', 'important');
-      });
-    }
-    // Settings icon: bare <svg> directly inside <header> (not wrapped in a div)
-    if (tag === 'SVG' && parentTag === 'HEADER') {
-      _touch44(el);
-      el.style.setProperty('padding',     '10px',        'important');
-      el.style.setProperty('box-sizing',  'border-box',  'important');
-      el.style.setProperty('cursor',      'pointer',     'important');
-      el.style.setProperty('flex-shrink', '0',           'important');
-    }
-    // Connection indicator: <div> with no role in the header (wraps the connection SVG)
-    if (tag === 'DIV' && parentTag === 'HEADER' && !el.getAttribute('role')) {
-      _touch44(el);
-      el.style.setProperty('display',         'inline-flex', 'important');
-      el.style.setProperty('align-items',     'center',      'important');
-      el.style.setProperty('justify-content', 'center',      'important');
-      el.style.setProperty('flex-shrink',     '0',           'important');
-    }
-    if (el.classList && el.classList.contains('hide-on-mobile')) {
-      el.style.setProperty('display', 'inline-flex', 'important');
-    }
-    // Profile quick-switch select
-    if (tag === 'SELECT' && el.classList && el.classList.contains('w-48')) {
-      el.style.setProperty('display',     'block',   'important');
-      el.style.setProperty('height',      '44px',    'important');
-      el.style.setProperty('margin',      '0 10px',  'important');
-      el.style.setProperty('flex-shrink', '0',       'important');
-    }
-    // .timer: stats string — flex:1 so it fills remaining space on the current row;
-    // if it wraps alone to the next row it naturally spans the full width.
-    if (el.classList && el.classList.contains('timer')) {
-      el.style.setProperty('flex',        '1 1 auto',     'important');
-      el.style.setProperty('min-width',   '0',            'important');
-      el.style.setProperty('order',       '999',          'important');
-      el.style.setProperty('text-align',  'left',         'important');
-      el.style.setProperty('min-height',  '44px',         'important');
-      el.style.setProperty('line-height', '44px',         'important');
-      el.style.setProperty('padding',     '0 10px',       'important');
-      el.style.setProperty('font-size',   '1.25rem',      'important');
-    }
-  }
-  var _SEL = 'header, button, [role="button"], .hide-on-mobile, .timer, select.w-48';
-  function _fixAll() {
-    document.querySelectorAll(_SEL).forEach(_fixNode);
-    // Also catch bare SVGs and unroled divs in header
-    var h = document.querySelector('header');
-    if (h) {
-      Array.prototype.forEach.call(h.children, _fixNode);
-    }
-  }
-  function _fixAdded(mutations) {
-    mutations.forEach(function(m) {
-      m.addedNodes.forEach(function(node) {
-        if (!node || node.nodeType !== 1) return;
-        _fixNode(node);
-        if (node.querySelectorAll) {
-          node.querySelectorAll(_SEL).forEach(_fixNode);
-        }
-        // If the header itself was added, fix its direct children too
-        if (node.tagName && node.tagName.toUpperCase() === 'HEADER') {
-          Array.prototype.forEach.call(node.children, _fixNode);
-        }
-      });
-    });
-  }
-  function _initFixes() {
-    _fixAll();
-    new MutationObserver(_fixAdded).observe(document.body, {childList: true, subtree: true});
-    // Retry after Svelte has had time to render
-    setTimeout(_fixAll, 400);
-    setTimeout(_fixAll, 1200);
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', _initFixes);
-  } else {
-    _initFixes();
-  }
-
-  // Stream preview panel — toggle with the camera button, polls /frame at ~2fps
-  // Canvas overlay draws profiler bounding boxes: green=dialogue, red=ignored.
-  (function() {
-    var visible = false;
-    var timer = null;
-
-    var panel = document.createElement('div');
-    panel.style.cssText = 'position:fixed;top:155px;left:8px;right:8px;z-index:9999;display:none;background:#000;border:1px solid #444;border-radius:6px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.6)';
-
-    // Wrapper: relative so the absolute canvas sits on top of the image.
-    var wrap = document.createElement('div');
-    wrap.style.cssText = 'position:relative;line-height:0';
-
-    var img = document.createElement('img');
-    img.style.cssText = 'display:block;width:100%;height:auto';
-
-    var cvs = document.createElement('canvas');
-    cvs.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
-
-    var lbl = document.createElement('div');
-    lbl.style.cssText = 'position:absolute;bottom:4px;left:4px;font:10px/1.3 monospace;color:#fff;background:rgba(0,0,0,.55);padding:2px 5px;border-radius:3px;pointer-events:none';
-
-    wrap.appendChild(img);
-    wrap.appendChild(cvs);
-    wrap.appendChild(lbl);
-    panel.appendChild(wrap);
-    document.body.appendChild(panel);
-
-    function drawBoxes(data) {
-      cvs.width  = img.offsetWidth  || 320;
-      cvs.height = img.offsetHeight || 180;
-      var ctx = cvs.getContext('2d');
-      ctx.clearRect(0, 0, cvs.width, cvs.height);
-      if (!data || !data.prediction) { lbl.textContent = ''; return; }
-      var pred = data.prediction;
-      var fw = data.frame_width, fh = data.frame_height;
-      if (!fw || !fh) return;
-      var sx = cvs.width / fw, sy = cvs.height / fh;
-
-      function box(bbox, fill, stroke) {
-        var x = bbox[0]*sx, y = bbox[1]*sy, w = (bbox[2]-bbox[0])*sx, h = (bbox[3]-bbox[1])*sy;
-        ctx.fillStyle = fill;   ctx.fillRect(x, y, w, h);
-        ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.strokeRect(x, y, w, h);
-      }
-
-      (pred.ocr_regions     || []).forEach(function(r){ box(r.bbox,'rgba(34,220,90,.28)','rgba(34,220,90,.9)'); });
-      (pred.ignore_regions  || []).forEach(function(r){ box(r.bbox,'rgba(220,50,50,.28)','rgba(220,50,50,.9)'); });
-      (pred.speaker_regions || []).forEach(function(r){ box(r.bbox,'rgba(250,180,0,.28)','rgba(250,180,0,.9)'); });
-
-      var conf = pred.confidence != null ? (pred.confidence*100).toFixed(0)+'%' : '';
-      lbl.textContent = (pred.mode || '') + (conf ? '  ' + conf : '');
-    }
-
-    function poll() {
-      if (!visible) return;
-      img.src = '/frame?' + Date.now();
-      fetch('/profiler-debug').then(function(r){ return r.ok ? r.json() : null; }).then(drawBoxes).catch(function(){ drawBoxes(null); });
-      timer = setTimeout(poll, 500);
-    }
-
-    var btn = document.createElement('button');
-    btn.title = 'Toggle stream preview';
-    btn.textContent = '📷';
-    btn.style.cssText = 'font-size:22px;background:none;border:none;cursor:pointer;min-height:44px;min-width:44px;padding:0;display:inline-flex;align-items:center;justify-content:center;color:inherit;flex-shrink:0;';
-    btn.onclick = function() {
-      visible = !visible;
-      panel.style.display = visible ? 'block' : 'none';
-      if (visible) poll();
-      else { clearTimeout(timer); timer = null; }
-    };
-    // Insert into header right after the last bare SVG (settings icon), before the profile select.
-    function _insertCameraBtn() {
-      var header = document.querySelector('header');
-      if (!header) { setTimeout(_insertCameraBtn, 200); return; }
-      var svgs = Array.prototype.filter.call(header.children, function(c) {
-        return c.tagName && c.tagName.toUpperCase() === 'SVG';
-      });
-      var anchor = svgs.length ? svgs[svgs.length - 1] : null;
-      if (anchor && anchor.nextSibling) {
-        header.insertBefore(btn, anchor.nextSibling);
-      } else {
-        header.appendChild(btn);
-      }
-    }
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', function() { setTimeout(_insertCameraBtn, 600); });
-    } else {
-      setTimeout(_insertCameraBtn, 600);
-    }
-  })();
 
   function ensurePreset(name) {
     if (!name) return;
@@ -661,6 +466,14 @@ def _set_game():
     return _fjson({"ok": True, "game": name or "(cleared)"})
 
 
+@_flask_app.route("/header-ui.js")
+def _header_ui_js():
+    import pathlib as _pl
+    src = _pl.Path(__file__).with_name("header_ui.js").read_bytes()
+    return _fResp(src, mimetype="application/javascript",
+                  headers={"Cache-Control": "no-store"})
+
+
 @_flask_app.route("/bridge-sync.js")
 def _bridge_sync_js():
     import json as _json
@@ -845,6 +658,25 @@ def _patch_vad_similarity():
 
     _WVAP._calculate_similarity = _patched_calculate_similarity
 
+    # partial_ratio inflates weak-match scores relative to fuzz.ratio. With ratio,
+    # wrong audio scores ~5–10% (below default 20% threshold → rejected). With
+    # partial_ratio, the same wrong audio scores ~25–30% (above 20% → accepted).
+    # Observed data: wrong matches 26–29%, correct matches 79–80%. 50% sits well
+    # clear of both clusters with margin on either side.
+    PARTIAL_RATIO_THRESHOLD = 50.0
+
+    @staticmethod
+    def _patched_passes_similarity_gate(text_mined: str, transcript: str) -> tuple[bool, float]:
+        similarity = _WVAP._calculate_similarity(text_mined, transcript)
+        accepted = similarity >= PARTIAL_RATIO_THRESHOLD
+        _vad_log.info(
+            f"[bridge] VAD similarity: {similarity:.1f}% (threshold {PARTIAL_RATIO_THRESHOLD:.0f}%) "
+            f"-> {'accepted' if accepted else 'rejected'}"
+        )
+        return accepted, similarity
+
+    _WVAP._passes_similarity_gate = _patched_passes_similarity_gate
+
     _orig_detect = _WVAP._detect_voice_activity
 
     def _detect_trim_to_match(self, input_audio, text_mined):
@@ -882,7 +714,7 @@ def _patch_vad_similarity():
         return result
 
     _WVAP._detect_voice_activity = _detect_trim_to_match
-    print("[bridge] VAD similarity patched (partial_ratio + segment trimming)", flush=True)
+    print(f"[bridge] VAD similarity patched (partial_ratio, threshold {PARTIAL_RATIO_THRESHOLD:.0f}% + segment trimming)", flush=True)
 
 
 def _start_gsm_background_services():
