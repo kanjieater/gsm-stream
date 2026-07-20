@@ -1,4 +1,19 @@
 (function() {
+  // Keep the screen awake while the page is open.
+  // Re-acquire on visibilitychange because the lock is released when the tab hides.
+  var _wakeLock = null;
+  function _acquireWakeLock() {
+    if (!navigator.wakeLock) return;
+    navigator.wakeLock.request('screen').then(function(lock) {
+      _wakeLock = lock;
+      lock.addEventListener('release', function() { _wakeLock = null; });
+    }).catch(function() {});
+  }
+  _acquireWakeLock();
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible') _acquireWakeLock();
+  });
+
   // CSS handles everything static: layout, sizing, hidden buttons.
   // Applied before Svelte renders; stays active through all reactive updates.
   var style = document.createElement('style');
