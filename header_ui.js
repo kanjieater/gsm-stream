@@ -41,7 +41,7 @@
     // Hide header buttons the user doesn't need
     'header [role="button"][title="Undo last Action"],' +
     'header [role="button"][title="Delete last Line"],' +
-    'header [role="button"][title="Open Statistics Page"],' +
+    'header [role="button"][title="Open Notes"],' +
     'header [role="button"][title="Open Floating Window"],' +
     'header [role="button"][title="Create media folder (no Anki card) for selected or last line"]' +
     '{display:none!important}';
@@ -228,7 +228,7 @@
     // the settings panel, so settings must stay open until we auto-confirm.
     function _watchAndAutoConfirm(onDone) {
       var obs = new MutationObserver(function() {
-        var btns = document.querySelectorAll('button.btn-primary.btn-sm');
+        var btns = document.querySelectorAll('button');
         for (var i = 0; i < btns.length; i++) {
           if (btns[i].textContent.trim() === 'Confirm') {
             obs.disconnect();
