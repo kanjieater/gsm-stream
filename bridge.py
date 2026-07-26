@@ -500,6 +500,9 @@ def _patch_gsm_replay():
     from datetime import datetime
 
     def _save_replay():
+        if not _s.is_stream_active():
+            raise RuntimeError("no active stream; skipping replay capture")
+
         from GameSentenceMiner.util.config.configuration import get_config, gsm_state
 
         line = (getattr(gsm_state, "line_for_screenshot", None)
@@ -573,8 +576,10 @@ def _patch_gsm_replay():
 
     # Unlock Anki card polling — normally gated on obs_service != None (OBS connected).
     # With GSM_ELECTRON=1 obs_service is always None, so polling never starts without this.
+    # Gate on stream activity so cards mined from non-stream sources (e.g. TTU reader)
+    # while the Switch stream is inactive don't trigger a stale-frame screenshot.
     import GameSentenceMiner.anki as _anki_mod
-    _anki_mod._is_anki_polling_allowed = lambda: True
+    _anki_mod._is_anki_polling_allowed = lambda: _s.is_stream_active()
 
 
 def _patch_gsm_text_normalization():
@@ -782,6 +787,10 @@ async def main():
     if not SWITCH_STREAM:
         print("ERROR: SWITCH_STREAM env var is required", flush=True)
         sys.exit(1)
+
+    sf = _load_yml().get("stable_frames")
+    if sf is not None and "STABLE_FRAMES" not in os.environ:
+        os.environ["STABLE_FRAMES"] = str(int(sf))
 
     controller.get_controller()
 

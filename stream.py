@@ -24,9 +24,14 @@ HQ_FRAME_DIR       = "/tmp/gsm_hq"
 HQ_FRAME_FPS       = 1  # must match the fps= value in the ffmpeg HQ output
 
 latest_frame: bytes | None = None
+_last_frame_ts: float = 0.0
 _last_profiler_key: str = ""
 
 _replay_buffer: deque[tuple[datetime, bytes]] = deque()
+
+
+def is_stream_active() -> bool:
+    return _last_frame_ts > 0 and time.time() - _last_frame_ts < FRAME_TIMEOUT_SECS
 
 _seg_lock        = threading.Lock()
 _session_start:  datetime | None = None
@@ -239,7 +244,7 @@ async def read_frames(stdout):
 
 
 async def bridge_loop(stream_url: str):
-    global latest_frame, _last_prune_ts
+    global latest_frame, _last_prune_ts, _last_frame_ts
     loop = asyncio.get_event_loop()
     while True:
         sid, audio_pattern, hq_pattern = _new_session()
@@ -270,8 +275,9 @@ async def bridge_loop(stream_url: str):
                 if not connected:
                     connected = True
                     print(f"bridge [{stream_url}]: receiving frames", flush=True)
-                now          = datetime.now()
-                latest_frame = jpeg
+                now            = datetime.now()
+                latest_frame   = jpeg
+                _last_frame_ts = time.time()
                 _replay_buffer.append((now, jpeg))
                 cutoff = now.timestamp() - REPLAY_BUFFER_SECS
                 while _replay_buffer and _replay_buffer[0][0].timestamp() < cutoff:
