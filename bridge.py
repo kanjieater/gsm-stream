@@ -789,6 +789,10 @@ def _patch_vad_verification():
                 flush=True,
             )
             if score < THRESHOLD:
+                try:
+                    os.remove(result.output_audio)
+                except OSError:
+                    pass
                 return VADResult(False, 0, 0, "vad-rejected")
         except Exception as e:
             print(f"[bridge] VAD verify error: {e}", flush=True)
