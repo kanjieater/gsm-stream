@@ -22,6 +22,7 @@ AUDIO_SEG_SECS     = 2
 AUDIO_SEG_DIR      = "/tmp/gsm_audio"
 HQ_FRAME_DIR       = "/tmp/gsm_hq"
 HQ_FRAME_FPS       = 1  # must match the fps= value in the ffmpeg HQ output
+FRAME_TIMEOUT_SECS = 30  # kill + retry if no frame data arrives within this window
 
 latest_frame: bytes | None = None
 _last_frame_ts: float = 0.0
@@ -216,9 +217,6 @@ def handle_frame_in_thread(jpeg: bytes, ts: datetime) -> None:
         )
 
 
-FRAME_TIMEOUT_SECS = 30  # kill + retry if no frame data arrives within this window
-
-
 async def read_frames(stdout):
     buf = bytearray()
     while True:
@@ -297,34 +295,3 @@ async def bridge_loop(stream_url: str):
         retry_delay = 5 if connected else 15
         print(f"[{stream_url}] retrying in {retry_delay}s...", flush=True)
         await asyncio.sleep(retry_delay)
-
-
-async def mjpeg_server():
-    async def _handle(reader, writer):
-        try:
-            await reader.read(4096)
-        except Exception:
-            pass
-        writer.write(
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
-            b"Cache-Control: no-cache\r\n"
-            b"Connection: close\r\n"
-            b"\r\n"
-        )
-        try:
-            while True:
-                frame = latest_frame
-                if frame:
-                    writer.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-                    await writer.drain()
-                await asyncio.sleep(0.5)
-        except Exception:
-            pass
-        finally:
-            writer.close()
-
-    server = await asyncio.start_server(_handle, "0.0.0.0", 7276)
-    print("MJPEG stream: http://0.0.0.0:7276/", flush=True)
-    async with server:
-        await server.serve_forever()

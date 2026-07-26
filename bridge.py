@@ -17,7 +17,8 @@ SWITCH_STREAM = os.environ.get("SWITCH_STREAM", f"rtsp://{SWITCH_HOST}:6666" if 
 _PROFILES_PATH = os.environ.get("PROFILES_CONFIG", "/profiles.yml")
 
 import controller
-from stream import bridge_loop, mjpeg_server
+import stream as _stream_mod
+from stream import bridge_loop
 
 # --- register bridge routes on GSM's Flask app before start_web_server() runs ---
 from GameSentenceMiner.web.texthooking_page import app as _flask_app
@@ -420,7 +421,6 @@ def _after_req(response):
 
 @_flask_app.route("/frame")
 def _current_frame():
-    import stream as _stream_mod
     from flask import Response
     frame = _stream_mod.latest_frame
     if not frame:
@@ -501,7 +501,8 @@ def _patch_gsm_replay():
 
     def _save_replay():
         if not _s.is_stream_active():
-            raise RuntimeError("no active stream; skipping replay capture")
+            print("replay: no active stream, skipping", flush=True)
+            return
 
         from GameSentenceMiner.util.config.configuration import get_config, gsm_state
 
@@ -578,8 +579,16 @@ def _patch_gsm_replay():
     # With GSM_ELECTRON=1 obs_service is always None, so polling never starts without this.
     # Gate on stream activity so cards mined from non-stream sources (e.g. TTU reader)
     # while the Switch stream is inactive don't trigger a stale-frame screenshot.
+    # Preserve the disable_recording guard from the original _is_anki_polling_allowed.
     import GameSentenceMiner.anki as _anki_mod
-    _anki_mod._is_anki_polling_allowed = lambda: _s.is_stream_active()
+    from GameSentenceMiner.util.config.configuration import get_config as _get_config
+
+    def _is_anki_polling_allowed():
+        if bool(getattr(_get_config().obs, "disable_recording", False)):
+            return False
+        return _s.is_stream_active()
+
+    _anki_mod._is_anki_polling_allowed = _is_anki_polling_allowed
 
 
 def _patch_gsm_text_normalization():
@@ -763,6 +772,37 @@ def _start_gsm_background_services():
     print("[bridge] VAD processor initialized", flush=True)
 
 
+async def mjpeg_server():
+    async def _handle(reader, writer):
+        try:
+            await reader.read(4096)
+        except Exception:
+            pass
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+            b"Cache-Control: no-cache\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+        )
+        try:
+            while True:
+                frame = _stream_mod.latest_frame
+                if frame:
+                    writer.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+                    await writer.drain()
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(_handle, "0.0.0.0", 7276)
+    print("MJPEG stream: http://0.0.0.0:7276/", flush=True)
+    async with server:
+        await server.serve_forever()
+
+
 def start_gsm_web_server():
     from GameSentenceMiner.util.config.configuration import get_config
     from GameSentenceMiner.web import register_routes
@@ -790,7 +830,10 @@ async def main():
 
     sf = _load_yml().get("stable_frames")
     if sf is not None and "STABLE_FRAMES" not in os.environ:
-        os.environ["STABLE_FRAMES"] = str(int(sf))
+        try:
+            os.environ["STABLE_FRAMES"] = str(int(sf))
+        except (ValueError, TypeError):
+            print(f"[bridge] ignoring invalid stable_frames value: {sf!r}", flush=True)
 
     controller.get_controller()
 
