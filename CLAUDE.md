@@ -39,8 +39,8 @@ Keep individual Python source files under 300 lines. Split by responsibility whe
 - `speaker_filter.py` — positional speaker name classifier; learns speaker regions from bbox position + dialogue adjacency
 - `ocr.py` — raw meikiocr and glens OCR calls
 - `controller.py` — TwoPassOCRControllerV2 wiring, send/second-pass callbacks
-- `stream.py` — RTSP ingestion (ffmpeg), per-frame dispatch, MJPEG debug server
-- `bridge.py` — env config, Flask route injection, GSM web server startup, `main()` entry point
+- `stream.py` — RTSP ingestion (ffmpeg), per-frame dispatch, replay buffer, `is_stream_active()`
+- `bridge.py` — env config, Flask route injection, GSM web server startup, MJPEG debug server, `main()` entry point
 - `Dockerfile` — python:3.11-slim + ffmpeg + gamesentenceminer + rapidfuzz
 - `entrypoint.sh` — starts owocr subprocess then bridge.py
 - `compose.yml` at `/mnt/srv/gsm-stream/compose.yml`

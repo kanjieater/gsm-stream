@@ -496,12 +496,17 @@ def _bridge_sync_js():
 def _patch_gsm_replay():
     import subprocess, tempfile, time as _time
     import GameSentenceMiner.obs as _obs_mod
-    import stream as _s
     from datetime import datetime
 
     def _save_replay():
-        if not _s.is_stream_active():
+        if not _stream_mod.is_stream_active():
             print("replay: no active stream, skipping", flush=True)
+            try:
+                import GameSentenceMiner.anki as _a
+                if _a.card_queue:
+                    _a.card_queue.pop(0)
+            except Exception:
+                pass
             return
 
         from GameSentenceMiner.util.config.configuration import get_config, gsm_state
@@ -521,9 +526,9 @@ def _patch_gsm_replay():
 
         # Build ~30s replay buffer ending at now — matches GSM's timing formula:
         # total_seconds = file_length − (anki_card_creation_time − game_line.time)
-        audio_combined = _s.get_audio_replay_buffer(now)
-        hq_path        = _s.get_hq_frame_near(line_ts) if line_ts else None
-        pipe_frame     = (_s.get_frame_near(line_ts) if line_ts else None) or _s.latest_frame
+        audio_combined = _stream_mod.get_audio_replay_buffer(now)
+        hq_path        = _stream_mod.get_hq_frame_near(line_ts) if line_ts else None
+        pipe_frame     = (_stream_mod.get_frame_near(line_ts) if line_ts else None) or _stream_mod.latest_frame
 
         if hq_path is None and pipe_frame is None:
             print("replay: no frame available", flush=True)
@@ -586,7 +591,7 @@ def _patch_gsm_replay():
     def _is_anki_polling_allowed():
         if bool(getattr(_get_config().obs, "disable_recording", False)):
             return False
-        return _s.is_stream_active()
+        return _stream_mod.is_stream_active()
 
     _anki_mod._is_anki_polling_allowed = _is_anki_polling_allowed
 
@@ -778,6 +783,9 @@ async def mjpeg_server():
             await reader.read(4096)
         except Exception:
             pass
+        except BaseException:
+            writer.close()
+            raise
         writer.write(
             b"HTTP/1.1 200 OK\r\n"
             b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
@@ -792,6 +800,8 @@ async def mjpeg_server():
                     writer.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
                     await writer.drain()
                 await asyncio.sleep(0.5)
+                if writer.transport.is_closing():
+                    break
         except Exception:
             pass
         finally:
