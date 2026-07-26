@@ -736,50 +736,66 @@ def _patch_vad_similarity():
     print(f"[bridge] VAD similarity patched (partial_ratio, threshold {PARTIAL_RATIO_THRESHOLD:.0f}% + segment trimming)", flush=True)
 
 
-def _patch_firered_verification():
-    """Post-verify FireRedVAD audio output against the card's expression using Whisper.
+def _patch_vad_verification():
+    """Post-verify final VAD audio output against the card's expression using Whisper.
 
-    FireRedVAD is a pure acoustic detector — it finds speech segments by energy but has
-    no text-matching. For unvoiced VN lines, dictionary popups, or clips where the wrong
-    utterance was captured, FireRedVAD returns success with wrong audio. This patch runs
-    faster-whisper turbo on the already-trimmed output clip and rejects it when the
-    transcript doesn't match the mined sentence (partial_ratio < 50).
+    Patches VADSystem.trim_audio_with_vad — the top-level method that runs both primary
+    (FireRedVAD) and backup VAD before returning the final result. Patching here means:
+    - Whisper sees the best audio the system produced (after backup too).
+    - VADResult(False) from our wrapper does NOT re-trigger backup; backup already ran
+      inside the original trim_audio_with_vad call.
+
+    FireRedVAD is a pure acoustic detector with no text-matching gate. This patch adds
+    the missing text-similarity check so wrong-audio cards are caught.
 
     Threshold calibrated on 73 cards (7-day sample): all 19 bad cards scored ≤ 44,
-    all 54 good cards scored ≥ 53. Raw partial_ratio used (no hiragana conversion) so
-    ateji readings in the expression don't cause false rejections.
+    all 54 good cards scored ≥ 53. Raw partial_ratio used (no kanji→hiragana
+    normalization; requires pykakasi which isn't in the image).
     """
-    from GameSentenceMiner.vad import FireRedVADProcessor
+    import threading as _threading
+    import GameSentenceMiner.vad as _vad_mod
     from GameSentenceMiner.util.models.model import VADResult
-    from faster_whisper import WhisperModel
     from rapidfuzz import fuzz
 
-    _whisper = WhisperModel("turbo", device="cpu", compute_type="int8")
+    _whisper_model = None
+    _whisper_lock = _threading.Lock()
+
+    def _get_whisper():
+        nonlocal _whisper_model
+        if _whisper_model is None:
+            with _whisper_lock:
+                if _whisper_model is None:
+                    from faster_whisper import WhisperModel
+                    print("[bridge] loading Whisper turbo model...", flush=True)
+                    _whisper_model = WhisperModel("turbo", device="cpu", compute_type="int8")
+                    print("[bridge] Whisper turbo model ready", flush=True)
+        return _whisper_model
+
     THRESHOLD = 50.0
 
-    _orig = FireRedVADProcessor.process_audio
+    _orig_trim = _vad_mod.VADSystem.trim_audio_with_vad
 
-    def _verified_process(self, input_audio, output_audio, game_line, text_mined):
-        result = _orig(self, input_audio, output_audio, game_line, text_mined)
-        if not result.success or not text_mined or not result.output_audio:
+    def _verified_trim(self, input_audio, output_audio, game_line, full_text):
+        result = _orig_trim(self, input_audio, output_audio, game_line, full_text)
+        if not result.success or not full_text or not result.output_audio:
             return result
         try:
-            segs, _ = _whisper.transcribe(result.output_audio, language="ja", beam_size=1)
+            segs, _ = _get_whisper().transcribe(result.output_audio, language="ja", beam_size=1)
             transcript = "".join(s.text for s in segs).strip()
-            score = fuzz.partial_ratio(text_mined, transcript)
+            score = fuzz.partial_ratio(full_text, transcript)
             print(
-                f"[bridge] FireRedVAD verify: {score:.0f}%"
-                f"  text={text_mined[:30]!r}  transcript={transcript[:30]!r}",
+                f"[bridge] VAD verify: {score:.0f}%"
+                f"  text={full_text[:30]!r}  transcript={transcript[:30]!r}",
                 flush=True,
             )
             if score < THRESHOLD:
-                return VADResult(False, 0, 0, "firered-rejected")
+                return VADResult(False, 0, 0, "vad-rejected")
         except Exception as e:
-            print(f"[bridge] FireRedVAD verify error: {e}", flush=True)
+            print(f"[bridge] VAD verify error: {e}", flush=True)
         return result
 
-    FireRedVADProcessor.process_audio = _verified_process
-    print(f"[bridge] FireRedVAD verification patched (whisper turbo, threshold {THRESHOLD:.0f}%)", flush=True)
+    _vad_mod.VADSystem.trim_audio_with_vad = _verified_trim
+    print(f"[bridge] VAD transcript verification patched (whisper turbo, threshold {THRESHOLD:.0f}%)", flush=True)
 
 
 def _start_gsm_background_services():
@@ -819,7 +835,7 @@ def _start_gsm_background_services():
     # Patch it to 0 so multi-line OCR blocks (long text_mined) don't trigger false rejections.
     _vad_module.SHORT_TEXT_RATIO_DEFAULT = 0
     _patch_vad_similarity()
-    _patch_firered_verification()
+    _patch_vad_verification()
     _vad.init()
     print("[bridge] VAD processor initialized", flush=True)
 
