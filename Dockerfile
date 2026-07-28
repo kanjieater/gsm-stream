@@ -10,7 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjemalloc2 \
     && rm -rf /var/lib/apt/lists/*
 
-ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+# LD_PRELOAD is set at runtime by entrypoint.sh using dpkg to find the
+# arch-correct path (x86_64 vs aarch64). MALLOC_CONF tells jemalloc to
+# run a background thread that returns dirty pages to the OS on a 5s decay.
+ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
 
 RUN pip install --no-cache-dir gamesentenceminer==2026.7.1 rapidfuzz faster-whisper
 

@@ -1,6 +1,6 @@
 import asyncio
-import ctypes
 import os
+import queue as _queue
 import time
 import threading
 from collections import deque
@@ -9,13 +9,6 @@ from io import BytesIO
 
 from PIL import Image
 from rapidfuzz.distance import Levenshtein as _Lev
-
-try:
-    _libc = ctypes.CDLL("libc.so.6", use_errno=True)
-    _malloc_trim = _libc.malloc_trim
-    _malloc_trim.restype = ctypes.c_int
-except Exception:
-    _malloc_trim = None
 
 import noise_filter
 import profiler_bridge
@@ -38,11 +31,22 @@ _last_profiler_key: str = ""
 
 _replay_buffer: deque[tuple[datetime, bytes]] = deque()
 
-# Allow at most one frame through the OCR pipeline at a time.
-# Without this, the 16-thread executor lets frames pile up: threads block on
-# _ctrl_lock waiting for a glens second pass (up to 12s), each holding a 6MB
-# PIL image + ONNX arena memory, while the event loop keeps queuing more.
-_ocr_slot = threading.Semaphore(1)
+# Single-worker OCR queue. maxsize=1 means a new frame always evicts any stale
+# waiting frame, so the worker sees the latest screen content immediately after
+# a long glens call — no blind spot, no memory pile-up.
+_frame_queue: _queue.Queue = _queue.Queue(maxsize=1)
+
+
+def _ocr_worker() -> None:
+    while True:
+        jpeg, ts = _frame_queue.get()
+        try:
+            handle_frame_in_thread(jpeg, ts)
+        except Exception as e:
+            print(f"ocr worker error: {e}", flush=True)
+
+
+threading.Thread(target=_ocr_worker, daemon=True, name="gsm-ocr").start()
 
 
 def is_stream_active() -> bool:
@@ -296,16 +300,15 @@ async def bridge_loop(stream_url: str):
                     _replay_buffer.popleft()
                 if now.timestamp() - _last_prune_ts > 10:
                     _prune_session_files(now)
-                    if _malloc_trim is not None:
-                        _malloc_trim(0)
                     _last_prune_ts = now.timestamp()
-                if _ocr_slot.acquire(blocking=False):
-                    def _run(j=jpeg, t=now):
-                        try:
-                            handle_frame_in_thread(j, t)
-                        finally:
-                            _ocr_slot.release()
-                    loop.run_in_executor(None, _run)
+                try:
+                    _frame_queue.put_nowait((jpeg, now))
+                except _queue.Full:
+                    try:
+                        _frame_queue.get_nowait()
+                    except _queue.Empty:
+                        pass
+                    _frame_queue.put_nowait((jpeg, now))
         except Exception as e:
             print(f"bridge error [{stream_url}]: {e}", flush=True)
         finally:
