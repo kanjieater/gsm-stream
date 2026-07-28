@@ -7,7 +7,10 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg netcat-openbsd \
     libglib2.0-0 libgl1 libegl1 libdbus-1-3 libxkbcommon0 \
+    libjemalloc2 \
     && rm -rf /var/lib/apt/lists/*
+
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
 RUN pip install --no-cache-dir gamesentenceminer==2026.7.1 rapidfuzz faster-whisper
 
