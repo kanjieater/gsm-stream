@@ -70,15 +70,24 @@ MJPEG debug stream on :7276
 - `_call_glens` opens a fresh WS connection per second-pass call (avoids shared-state issues with the owocr glens subprocess)
 
 ## Deploy
+Images are built and pushed to GHCR automatically by GitHub Actions on every
+push to main. Locally-built images are no longer used.
+
 ```bash
-cd /mnt/srv/gsm-stream
-./deploy.sh          # tags previous image as gsm-stream:<sha>-prev, builds + deploys both containers
+# Pull latest from GHCR and redeploy both containers:
+cd /mnt/srv/gsm-stream && ./deploy.sh
 docker compose logs -f
 
-# Roll back if needed:
-docker tag gsm-stream:<sha> gsm-stream:latest
-docker compose up -d && cd /mnt/cc/srv/gsm-stream-2 && docker compose up -d
+# Roll back to a specific SHA (no rebuild needed):
+# Edit compose.yml image tag to ghcr.io/kanjieater/gsm-stream:<sha>, then:
+docker compose pull && docker compose up -d
+cd /mnt/cc/srv/gsm-stream-2 && docker compose pull && docker compose up -d
 ```
+
+### CI/CD
+- **Push to main** → builds image, pushes `ghcr.io/kanjieater/gsm-stream:latest` + `:<sha>`
+- **Pull request** → builds image, pushes `ghcr.io/kanjieater/gsm-stream:pr-N` (testable before merge)
+- **GHCR package** must be set to Public in GitHub → Packages settings (one-time, no auth needed to pull)
 
 ## Security
 **Never hardcode personal domains, subdomains, or private URLs in source files.**
