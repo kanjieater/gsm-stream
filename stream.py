@@ -1,5 +1,6 @@
 import asyncio
 import os
+import queue as _queue
 import time
 import threading
 from collections import deque
@@ -29,6 +30,23 @@ _last_frame_ts: float = 0.0
 _last_profiler_key: str = ""
 
 _replay_buffer: deque[tuple[datetime, bytes]] = deque()
+
+# Single-worker OCR queue. maxsize=1 means a new frame always evicts any stale
+# waiting frame, so the worker sees the latest screen content immediately after
+# a long glens call — no blind spot, no memory pile-up.
+_frame_queue: _queue.Queue = _queue.Queue(maxsize=1)
+
+
+def _ocr_worker() -> None:
+    while True:
+        jpeg, ts = _frame_queue.get()
+        try:
+            handle_frame_in_thread(jpeg, ts)
+        except Exception as e:
+            print(f"ocr worker error: {e}", flush=True)
+
+
+threading.Thread(target=_ocr_worker, daemon=True, name="gsm-ocr").start()
 
 
 def is_stream_active() -> bool:
@@ -283,7 +301,14 @@ async def bridge_loop(stream_url: str):
                 if now.timestamp() - _last_prune_ts > 10:
                     _prune_session_files(now)
                     _last_prune_ts = now.timestamp()
-                loop.run_in_executor(None, handle_frame_in_thread, jpeg, now)
+                try:
+                    _frame_queue.put_nowait((jpeg, now))
+                except _queue.Full:
+                    try:
+                        _frame_queue.get_nowait()
+                    except _queue.Empty:
+                        pass
+                    _frame_queue.put_nowait((jpeg, now))
         except Exception as e:
             print(f"bridge error [{stream_url}]: {e}", flush=True)
         finally:

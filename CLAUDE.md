@@ -72,8 +72,12 @@ MJPEG debug stream on :7276
 ## Deploy
 ```bash
 cd /mnt/srv/gsm-stream
-docker compose build && docker compose up -d
+./deploy.sh          # tags previous image as gsm-stream:<sha>-prev, builds + deploys both containers
 docker compose logs -f
+
+# Roll back if needed:
+docker tag gsm-stream:<sha> gsm-stream:latest
+docker compose up -d && cd /mnt/cc/srv/gsm-stream-2 && docker compose up -d
 ```
 
 ## Security

@@ -5,12 +5,19 @@ Entry point. Wires env config, GSM web server, and the stream loop together.
 See CLAUDE.md for architecture overview and module descriptions.
 """
 import asyncio
+import ctypes
 import os
 import sys
 import threading
 import yaml
 
 os.environ.setdefault("GSM_ELECTRON", "1")
+
+try:
+    # PR_SET_NAME (15) sets /proc/self/comm — the name btop/htop/ps show.
+    ctypes.CDLL("libc.so.6").prctl(15, b"gsm-stream", 0, 0, 0)
+except Exception:
+    pass
 
 SWITCH_HOST   = os.environ.get("SWITCH_HOST", "")
 SWITCH_STREAM = os.environ.get("SWITCH_STREAM", f"rtsp://{SWITCH_HOST}:6666" if SWITCH_HOST else "")
