@@ -50,7 +50,16 @@ _BRIDGE_JS_TEMPLATE = r"""
   var UI_DEFAULTS = __UI_DEFAULTS__;
   var NO_DOLLAR = {filterNonCJKLines: true};
 
-  function presetKey(k) { return NO_DOLLAR[k] ? k : k + '$'; }
+  function presetKey(k) {
+    if (k === 'secondary-websocketUrl') return 'secondaryWebsocketUrl$';
+    return NO_DOLLAR[k] ? k : k + '$';
+  }
+
+  // Upstream boolean stores parse with !!+value, not JSON.parse(value).
+  function storageValue(v) {
+    return typeof v === 'boolean' ? (v ? '1' : '0')
+      : typeof v === 'string' ? v : JSON.stringify(v);
+  }
 
   function buildSettings(name) {
     var s = {};
@@ -59,16 +68,20 @@ _BRIDGE_JS_TEMPLATE = r"""
     return s;
   }
 
-  // When ui_defaults change in profiles.yml, wipe stale localStorage so new
-  // defaults take effect. Cache-Control: no-store on bridge-sync.js ensures the
-  // browser always fetches the current hash.
+  // Defaults are seeds, never permission to delete user data or settings.
+  // Repair only malformed booleans written by older bridge versions. Preserve
+  // valid '0'/'1' choices, presets, lines, notes, timer and unknown future keys.
   var DEFAULTS_VER = __DEFAULTS_VER__;
   try {
-    if (localStorage.getItem('bannou-texthooker-__bridge_ver__') !== DEFAULTS_VER) {
-      var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith('bannou-texthooker-'); });
-      for (var i = 0; i < keys.length; i++) localStorage.removeItem(keys[i]);
-      localStorage.setItem('bannou-texthooker-__bridge_ver__', DEFAULTS_VER);
+    for (var k in UI_DEFAULTS) {
+      if (typeof UI_DEFAULTS[k] !== 'boolean') continue;
+      var key = 'bannou-texthooker-' + k;
+      var old = localStorage.getItem(key);
+      if (old === 'true' || old === 'false') {
+        localStorage.setItem(key, old === 'true' ? '1' : '0');
+      }
     }
+    localStorage.setItem('bannou-texthooker-__bridge_ver__', DEFAULTS_VER);
   } catch(e) {}
 
   // Inject missing preset entries before Svelte initialises its stores.
@@ -94,7 +107,7 @@ _BRIDGE_JS_TEMPLATE = r"""
       var lk = 'bannou-texthooker-' + k;
       if (localStorage.getItem(lk) === null) {
         var v = UI_DEFAULTS[k];
-        localStorage.setItem(lk, typeof v === 'string' ? v : JSON.stringify(v));
+        localStorage.setItem(lk, storageValue(v));
       }
     }
   } catch(e) { console.warn('[bridge] preset init:', e); }
@@ -124,7 +137,10 @@ _BRIDGE_JS_TEMPLATE = r"""
         localStorage.setItem('bannou-texthooker-settingPresets', JSON.stringify(presets));
         // Also stamp individual keys so they take effect on next load.
         for (var k in UI_DEFAULTS) {
-          localStorage.setItem('bannou-texthooker-' + k, typeof UI_DEFAULTS[k] === 'string' ? UI_DEFAULTS[k] : JSON.stringify(UI_DEFAULTS[k]));
+          var lk = 'bannou-texthooker-' + k;
+          if (localStorage.getItem(lk) === null) {
+            localStorage.setItem(lk, storageValue(UI_DEFAULTS[k]));
+          }
         }
         localStorage.setItem('bannou-texthooker-windowTitle', name);
       }

@@ -17,6 +17,8 @@ jobs:
         gsm: ['2026.7.1', '2026.9.2']
     steps:
       - uses: actions/checkout@v4
+      - name: Test browser storage serialization and migration
+        run: python3 -m unittest discover -s tests -p test_bridge_storage.py -v
       - name: Build isolated version
         run: docker build --build-arg GSM_VERSION=${{ matrix.gsm }} -t gsm-contracts .
       - name: Validate installed dependencies
