@@ -825,7 +825,11 @@ def _start_gsm_background_services():
     print(f"[bridge] file watcher started: {watch_dir}", flush=True)
 
     # Anki polling thread — detects new Yomitan cards and calls queue_card_for_processing()
-    _anki_mod.start_monitoring_anki()
+    # GSM 2026.9 runs this blocking loop in its runtime-owned worker thread.
+    # Calling it directly prevents VAD initialization and RTSP ingestion.
+    threading.Thread(
+        target=_anki_mod.start_monitoring_anki, name="anki-monitor", daemon=True,
+    ).start()
     print("[bridge] Anki monitor started", flush=True)
 
     # Restore current_game from the saved profile so VAD output filenames are valid
