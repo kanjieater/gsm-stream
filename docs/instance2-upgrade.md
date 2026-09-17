@@ -9,9 +9,14 @@ The default Docker build remains GSM 2026.7.1; the candidate is opt-in:
 ```sh
 docker build --build-arg GSM_VERSION=2026.9.2 -t gsm-stream-candidate:2026.9.2 .
 docker run --rm --network none --entrypoint python \
-  -e EXPECT_GSM_NATIVE=1 gsm-stream-candidate:2026.9.2 \
+  -e EXPECT_GSM_NATIVE=1 -e GSM_TEST_ISOLATED=1 gsm-stream-candidate:2026.9.2 \
   -m unittest discover -s tests -v
 ```
+
+Ordinary unittest discovery skips the GSM integration module before importing
+bridge/GSM. `GSM_TEST_ISOLATED=1` is an explicit attestation, not a sandbox:
+use it only in a disposable container without real GSM state mounted. Do not
+set it on the host. `PROFILES_CONFIG` alone does not isolate GSM's config/DB.
 
 The ordinary PR image remains on 2026.7.1. The upgrade-contracts workflow builds
 both releases without publishing or deploying the candidate. Do not repoint

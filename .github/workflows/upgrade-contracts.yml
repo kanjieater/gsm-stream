@@ -17,6 +17,8 @@ jobs:
         gsm: ['2026.7.1', '2026.9.2']
     steps:
       - uses: actions/checkout@v4
+      - name: Test integration discovery safety
+        run: python3 -m unittest discover -s tests -p test_upgrade_safety.py -v
       - name: Test browser storage serialization and migration
         run: python3 -m unittest discover -s tests -p test_bridge_storage.py -v
       - name: Build isolated version
@@ -28,5 +30,5 @@ jobs:
           EXPECT_GSM_NATIVE: ${{ matrix.gsm == '2026.9.2' && '1' || '0' }}
         run: >-
           docker run --rm --network none --memory 3g --cpus 2
-          -e EXPECT_GSM_NATIVE --entrypoint python gsm-contracts
+          -e EXPECT_GSM_NATIVE -e GSM_TEST_ISOLATED=1 --entrypoint python gsm-contracts
           -m unittest discover -s tests -v

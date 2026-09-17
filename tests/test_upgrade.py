@@ -1,6 +1,9 @@
 """Offline integration contracts against the installed GSM (no production mounts).
 
-Run in a disposable container with --network none. Lens/Anki are test doubles;
+Run in a disposable container with --network none, no production mounts, and
+GSM_TEST_ISOLATED=1. Ordinary discovery skips BEFORE importing bridge/GSM.
+The opt-in attests isolation; it does not create a sandbox. Never set it on the
+host or in a container mounting real GSM state. Lens/Anki are test doubles;
 these tests do NOT establish OCR accuracy, audio quality or end-to-end mining.
 """
 import asyncio
@@ -9,6 +12,14 @@ import os
 import threading
 import unittest
 from unittest.mock import AsyncMock, patch
+
+# Importing bridge initializes GSM configuration/database state. This guard
+# must precede all application and third-party imports, not just test setup.
+if os.environ.get("GSM_TEST_ISOLATED") != "1":
+    raise unittest.SkipTest(
+        "GSM integration tests require GSM_TEST_ISOLATED=1 in a disposable "
+        "container without real GSM data mounts"
+    )
 
 os.environ.setdefault("GSM_ELECTRON", "1")
 os.environ["PROFILES_CONFIG"] = "/nonexistent-test-profiles.yml"
