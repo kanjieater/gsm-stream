@@ -13,9 +13,10 @@ def template():
                 and any(isinstance(t, ast.Name) and t.id == '_BRIDGE_JS_TEMPLATE' for t in n.targets))
 
 
-def render(version):
+def render(version, remove_whitespace=False):
     defaults = {'persistLines': True, 'persistStats': True, 'persistNotes': True,
-                'persistActionHistory': False, 'fontSize': 24, 'secondary-websocketUrl': ''}
+                'persistActionHistory': False, 'fontSize': 24, 'secondary-websocketUrl': '',
+                'removeAllWhitespace': remove_whitespace}
     return (template().replace('__PROFILES__', '["Fixture"]')
             .replace('__UI_DEFAULTS__', json.dumps(defaults))
             .replace('__DEFAULTS_VER__', json.dumps(version)))
@@ -49,20 +50,33 @@ data[prefix+'timeValue'] = '123';
 data[prefix+'userNotes'] = 'keep notes';
 data[prefix+'future-key'] = 'keep unknown data';
 data[prefix+'fontSize'] = '32';
+data[prefix+'unmanagedSetting'] = 'custom';
+presets[0].settings.unmanagedSetting$ = 'custom';
+presets[0].extraMetadata = 'keep';
+data[prefix+'settingPresets'] = JSON.stringify(presets);
+assert.equal(data[prefix+'removeAllWhitespace'], '0');
 data[prefix+'persistLines'] = 'true'; // legacy malformed seed
 load(data, scripts[1]); // changed defaults hash must not wipe anything
 assert.equal(data[prefix+'persistLines'], '1');
 for (const [key,value] of Object.entries({lineData:'[{"text":"保存テスト"}]',
- timeValue:'123',userNotes:'keep notes','future-key':'keep unknown data',fontSize:'32'})) {
+ timeValue:'123',userNotes:'keep notes','future-key':'keep unknown data',unmanagedSetting:'custom'})) {
  assert.equal(data[prefix+key], value);
 }
-assert.equal(data[prefix+'settingPresets'], JSON.stringify(presets));
-data[prefix+'persistLines'] = '0'; // explicit supported user choice is preserved
-load(data, scripts[0]);
-assert.equal(data[prefix+'persistLines'], '0');
-console.log('storage seeding, legacy repair, reload, changed hash, preservation: PASS');
+assert.equal(data[prefix+'fontSize'], '24');
+assert.equal(data[prefix+'removeAllWhitespace'], '1');
+let updated = JSON.parse(data[prefix+'settingPresets']);
+assert.equal(updated[0].settings.removeAllWhitespace$, true);
+assert.equal(updated[0].settings.unmanagedSetting$, 'custom');
+assert.equal(updated[0].extraMetadata, 'keep');
+data[prefix+'persistLines'] = '0'; // managed setting must follow server on reload
+load(data, scripts[1]);
+assert.equal(data[prefix+'persistLines'], '1');
+load(data, scripts[0]); // server also pushes true -> false correctly
+assert.equal(data[prefix+'removeAllWhitespace'], '0');
+assert.equal(JSON.parse(data[prefix+'settingPresets'])[0].settings.removeAllWhitespace$, false);
+console.log('server settings push, preset reconciliation, reload, progress preservation: PASS');
 '''
-        result = subprocess.run(['node', '-e', harness], input=json.dumps([render('a'), render('b')]),
+        result = subprocess.run(['node', '-e', harness], input=json.dumps([render('a'), render('b', True)]),
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
