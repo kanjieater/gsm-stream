@@ -65,6 +65,9 @@ profiles: []
 #   'My Game Title':
 #     ocr_strip: "some noise pattern$"
 game_overrides:
+  'Hiiro no Kakera Tamayori-hime Kitan: Omoi Iro no Kioku':
+    # Read/skip/auto indicators; do not remove 既/強/自/白 inside dialogue.
+    ocr_strip: '(?m)(?:既読早送り|[既強][既強自白\s]+|(?<=[。！？」』])既|^[^\S\r\n]*既)(?:\s*【)?\s*\Z|^[^\S\r\n]*(?:既読早送り|強制早送り|自動送り|[既強自])[^\S\r\n]*(?:\r?\n|$)'
   'Hakuoki: Chronicles of Wind and Blossom':
     # Standalone read-indicator lines only; preserve 既/読 inside dialogue.
     ocr_strip: '(?m)^[^\S\r\n]*(?:既[^\S\r\n]*読|既|読)(?:[^\S\r\n]*[◆◇][^\S\r\n]*きどく)?[^\S\r\n]*(?:\r?\n|$)'
