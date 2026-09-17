@@ -50,7 +50,16 @@ _BRIDGE_JS_TEMPLATE = r"""
   var UI_DEFAULTS = __UI_DEFAULTS__;
   var NO_DOLLAR = {filterNonCJKLines: true};
 
-  function presetKey(k) { return NO_DOLLAR[k] ? k : k + '$'; }
+  function presetKey(k) {
+    if (k === 'secondary-websocketUrl') return 'secondaryWebsocketUrl$';
+    return NO_DOLLAR[k] ? k : k + '$';
+  }
+
+  // Upstream boolean stores parse with !!+value, not JSON.parse(value).
+  function storageValue(v) {
+    return typeof v === 'boolean' ? (v ? '1' : '0')
+      : typeof v === 'string' ? v : JSON.stringify(v);
+  }
 
   function buildSettings(name) {
     var s = {};
@@ -59,16 +68,20 @@ _BRIDGE_JS_TEMPLATE = r"""
     return s;
   }
 
-  // When ui_defaults change in profiles.yml, wipe stale localStorage so new
-  // defaults take effect. Cache-Control: no-store on bridge-sync.js ensures the
-  // browser always fetches the current hash.
+  // Only explicitly configured settings are server-managed. Never clear the
+  // storage namespace: it also contains lines, notes, timer and action history.
+  // Unconfigured settings and extra preset metadata remain browser-owned.
   var DEFAULTS_VER = __DEFAULTS_VER__;
   try {
-    if (localStorage.getItem('bannou-texthooker-__bridge_ver__') !== DEFAULTS_VER) {
-      var keys = Object.keys(localStorage).filter(function(k) { return k.startsWith('bannou-texthooker-'); });
-      for (var i = 0; i < keys.length; i++) localStorage.removeItem(keys[i]);
-      localStorage.setItem('bannou-texthooker-__bridge_ver__', DEFAULTS_VER);
+    for (var k in UI_DEFAULTS) {
+      if (typeof UI_DEFAULTS[k] !== 'boolean') continue;
+      var key = 'bannou-texthooker-' + k;
+      var old = localStorage.getItem(key);
+      if (old === 'true' || old === 'false') {
+        localStorage.setItem(key, old === 'true' ? '1' : '0');
+      }
     }
+    localStorage.setItem('bannou-texthooker-__bridge_ver__', DEFAULTS_VER);
   } catch(e) {}
 
   // Inject missing preset entries before Svelte initialises its stores.
@@ -81,6 +94,21 @@ _BRIDGE_JS_TEMPLATE = r"""
     try { presets = JSON.parse(raw) || []; } catch(e) {}
     if (!Array.isArray(presets)) presets = [];
     var changed = false;
+    // Update existing presets too, otherwise selecting one restores stale values.
+    for (var i = 0; i < presets.length; i++) {
+      var preset = presets[i];
+      if (!preset || typeof preset !== 'object' || Array.isArray(preset)) continue;
+      if (!preset.settings || typeof preset.settings !== 'object' || Array.isArray(preset.settings)) {
+        preset.settings = {};
+      }
+      for (var k in UI_DEFAULTS) {
+        var pk = presetKey(k);
+        if (JSON.stringify(preset.settings[pk]) !== JSON.stringify(UI_DEFAULTS[k])) {
+          preset.settings[pk] = UI_DEFAULTS[k];
+          changed = true;
+        }
+      }
+    }
     for (var i = 0; i < PROFILES.length; i++) {
       var name = PROFILES[i];
       var found = false;
@@ -89,13 +117,11 @@ _BRIDGE_JS_TEMPLATE = r"""
     }
     if (changed) localStorage.setItem('bannou-texthooker-settingPresets', JSON.stringify(presets));
 
-    // Seed global localStorage keys from ui_defaults only when not yet set.
+    // Reconcile managed settings on every page load, without touching progress.
     for (var k in UI_DEFAULTS) {
       var lk = 'bannou-texthooker-' + k;
-      if (localStorage.getItem(lk) === null) {
-        var v = UI_DEFAULTS[k];
-        localStorage.setItem(lk, typeof v === 'string' ? v : JSON.stringify(v));
-      }
+      var v = storageValue(UI_DEFAULTS[k]);
+      if (localStorage.getItem(lk) !== v) localStorage.setItem(lk, v);
     }
   } catch(e) { console.warn('[bridge] preset init:', e); }
 
@@ -122,9 +148,9 @@ _BRIDGE_JS_TEMPLATE = r"""
       if (!found) {
         presets.push({name: name, settings: buildSettings(name)});
         localStorage.setItem('bannou-texthooker-settingPresets', JSON.stringify(presets));
-        // Also stamp individual keys so they take effect on next load.
+        // Keep managed settings consistent with the newly created preset.
         for (var k in UI_DEFAULTS) {
-          localStorage.setItem('bannou-texthooker-' + k, typeof UI_DEFAULTS[k] === 'string' ? UI_DEFAULTS[k] : JSON.stringify(UI_DEFAULTS[k]));
+          localStorage.setItem('bannou-texthooker-' + k, storageValue(UI_DEFAULTS[k]));
         }
         localStorage.setItem('bannou-texthooker-windowTitle', name);
       }
@@ -825,7 +851,11 @@ def _start_gsm_background_services():
     print(f"[bridge] file watcher started: {watch_dir}", flush=True)
 
     # Anki polling thread — detects new Yomitan cards and calls queue_card_for_processing()
-    _anki_mod.start_monitoring_anki()
+    # GSM 2026.9 runs this blocking loop in its runtime-owned worker thread.
+    # Calling it directly prevents VAD initialization and RTSP ingestion.
+    threading.Thread(
+        target=_anki_mod.start_monitoring_anki, name="anki-monitor", daemon=True,
+    ).start()
     print("[bridge] Anki monitor started", flush=True)
 
     # Restore current_game from the saved profile so VAD output filenames are valid

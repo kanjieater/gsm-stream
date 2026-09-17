@@ -15,7 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # run a background thread that returns dirty pages to the OS on a 5s decay.
 ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
 
-RUN pip install --no-cache-dir gamesentenceminer==2026.7.1 rapidfuzz faster-whisper
+# Keep the primary deployment on its existing release. The instance-2 candidate
+# explicitly opts in at build time; never move the shared :latest tag to it.
+ARG GSM_VERSION=2026.7.1
+RUN pip install --no-cache-dir gamesentenceminer==${GSM_VERSION} rapidfuzz faster-whisper
 
 WORKDIR /app
 COPY . .

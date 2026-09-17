@@ -1,0 +1,34 @@
+name: GSM upgrade contracts
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gsm: ['2026.7.1', '2026.9.2']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test integration discovery safety
+        run: python3 -m unittest discover -s tests -p test_upgrade_safety.py -v
+      - name: Test browser storage serialization and migration
+        run: python3 -m unittest discover -s tests -p test_bridge_storage.py -v
+      - name: Build isolated version
+        run: docker build --build-arg GSM_VERSION=${{ matrix.gsm }} -t gsm-contracts .
+      - name: Validate installed dependencies
+        run: docker run --rm --network none --entrypoint python gsm-contracts -m pip check
+      - name: Run offline bridge contracts
+        env:
+          EXPECT_GSM_NATIVE: ${{ matrix.gsm == '2026.9.2' && '1' || '0' }}
+        run: >-
+          docker run --rm --network none --memory 3g --cpus 2
+          -e EXPECT_GSM_NATIVE -e GSM_TEST_ISOLATED=1 --entrypoint python gsm-contracts
+          -m unittest discover -s tests -v
