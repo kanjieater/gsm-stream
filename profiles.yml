@@ -64,4 +64,7 @@ profiles: []
 # game_overrides:
 #   'My Game Title':
 #     ocr_strip: "some noise pattern$"
-game_overrides: {}
+game_overrides:
+  'Hakuoki: Chronicles of Wind and Blossom':
+    # Standalone read-indicator lines only; preserve 既/読 inside dialogue.
+    ocr_strip: '(?m)^[^\S\r\n]*(?:既[^\S\r\n]*読|既|読)(?:[^\S\r\n]*[◆◇][^\S\r\n]*きどく)?[^\S\r\n]*(?:\r?\n|$)'
