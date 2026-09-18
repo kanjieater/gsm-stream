@@ -1,4 +1,101 @@
 (function() {
+  // GSM 2026.9.2's TextFeed v2 reconnect flow requests only lines newer than
+  // the client's highest known stream sequence (`text_v2_snapshot_request`
+  // with `after_sequence`). When the client is already caught up, the server
+  // correctly replies with an empty `text_v2_snapshot`. The client then
+  // treats every existing same-session line as "requested but not returned"
+  // and prunes all of them, wiping the TextFeed's lines (both the live view
+  // and the persisted `bannou-texthooker-lineData` localStorage entry) while
+  // the separately-stored timer keeps running untouched.
+  // See kanjieater/gsm-stream#6.
+  //
+  // GSM mutates its live `lineData$` store before its persistence
+  // subscriber ever writes localStorage, so anything that only reacts to the
+  // localStorage write is already too late -- the live view has already
+  // been cleared. The fix has to happen before GSM computes a sync plan
+  // from this event at all.
+  //
+  // The same bug also fires for a non-empty but *partial* snapshot: if the
+  // server's replay buffer has aged out some older same-session lines, its
+  // response only lists the ids it still has -- but GSM's reconciliation
+  // still treats every locally-held same-session id as "requested", so
+  // whatever wasn't in this shorter response gets pruned as if it were
+  // confirmed gone, even though it's simply outside the replay window.
+  //
+  // GSM's handling of this same event also does session bookkeeping that
+  // must keep running for every snapshot, empty or not: it records the
+  // current session id and resets the per-session removed-line-id tracking
+  // used to stop locally-deleted lines from reappearing on resync. So this
+  // must never drop the message or touch its `session_id` -- it only adds
+  // back, to the `lines` payload, whatever locally-held same-session ids
+  // the server's response is missing, steering GSM's own (unmodified)
+  // reconciliation into its normal merge path instead of the branch that
+  // (buggily) treats them as "requested but not returned". Real entries the
+  // server did return are passed through completely unmodified. The ids we
+  // add back are marked `state: 'expired'` so GSM classifies them as
+  // timed-out history outside the replay buffer, not as freshly
+  // active/replayable lines -- GSM still reads their actual content
+  // straight out of its own still-intact live store, so this never
+  // fabricates line data, and its real removed-line filtering still
+  // applies to whatever ids are listed here.
+  // === textfeed-reconnect-guard:start ===
+  (function() {
+    var LINE_DATA_KEY = 'bannou-texthooker-lineData';
+
+    function parseJSON(raw, fallback) {
+      try { return JSON.parse(raw); } catch (e) { return fallback; }
+    }
+
+    function buildSnapshotRewrite(data) {
+      if (!data || data.event !== 'text_v2_snapshot') return null;
+      var sessionId = typeof data.session_id === 'string' ? data.session_id : '';
+      var currentLines = parseJSON(window.localStorage.getItem(LINE_DATA_KEY), []);
+      if (!Array.isArray(currentLines)) return null;
+      var incomingLines = Array.isArray(data.lines) ? data.lines : [];
+      var incomingIds = {};
+      incomingLines.forEach(function(line) {
+        if (line && typeof line.id === 'string') incomingIds[line.id] = true;
+      });
+      var missingSameSessionIds = currentLines
+        .filter(function(line) {
+          return line && line.gsmSessionId === sessionId && typeof line.id === 'string' && !incomingIds[line.id];
+        })
+        .map(function(line) { return line.id; });
+      if (!missingSameSessionIds.length) return null;
+      return Object.assign({}, data, {
+        lines: incomingLines.concat(missingSameSessionIds.map(function(id) {
+          return { id: id, state: 'expired' };
+        })),
+      });
+    }
+
+    var onmessageDescriptor = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage');
+    if (onmessageDescriptor && onmessageDescriptor.set) {
+      Object.defineProperty(WebSocket.prototype, 'onmessage', {
+        configurable: true,
+        enumerable: onmessageDescriptor.enumerable,
+        get: onmessageDescriptor.get,
+        set: function(handler) {
+          if (typeof handler !== 'function') {
+            return onmessageDescriptor.set.call(this, handler);
+          }
+          return onmessageDescriptor.set.call(this, function(event) {
+            var raw = event && event.data;
+            if (typeof raw === 'string') {
+              var rewritten = buildSnapshotRewrite(parseJSON(raw, null));
+              if (rewritten) {
+                console.warn('[gsm-stream] Rewrote empty TextFeed v2 reconnect snapshot to avoid wiping persisted lines (kanjieater/gsm-stream#6)');
+                return handler.call(this, { data: JSON.stringify(rewritten) });
+              }
+            }
+            return handler.apply(this, arguments);
+          });
+        },
+      });
+    }
+  })();
+  // === textfeed-reconnect-guard:end ===
+
   // Keep the screen awake while the page is open.
   // Re-acquire on visibilitychange because the lock is released when the tab hides.
   var _wakeLock = null;
