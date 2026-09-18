@@ -1,43 +1,54 @@
 (function() {
-  // GSM 2026.9.2's TextFeed v2 reconnect flow can wipe persisted lines while
-  // leaving the timer untouched: on reconnect it sends `text_v2_snapshot_request`
-  // with `after_sequence` set to the highest locally-known sequence, and if the
-  // client is already caught up the server replies with an empty snapshot.
-  // The client's session-reconciliation logic then treats every existing
-  // same-session line as "requested but not returned" and prunes them all,
-  // overwriting `bannou-texthooker-lineData` with `[]` in localStorage.
-  // See kanjieater/gsm-stream#6. Guard only within a short window after that
-  // specific request is sent, so it never interferes with the real "Reset Data"
-  // button (which clears the timer too).
+  // GSM 2026.9.2's TextFeed v2 reconnect flow requests only lines newer than
+  // the client's highest known stream sequence (`text_v2_snapshot_request`
+  // with `after_sequence`). When the client is already caught up, the server
+  // correctly replies with an empty `text_v2_snapshot`. The client then
+  // treats every existing same-session line as "requested but not returned"
+  // and prunes all of them, wiping the TextFeed's lines (both the live view
+  // and the persisted `bannou-texthooker-lineData` localStorage entry) while
+  // the separately-stored timer keeps running untouched.
+  // See kanjieater/gsm-stream#6.
+  //
+  // An empty incremental snapshot never carries information that existing
+  // lines are stale — the server simply had nothing newer to send — so the
+  // correct handling is to never hand that specific event to GSM's own
+  // reconciliation logic at all. Intercept it at the transport layer, before
+  // `socket.onmessage` (which GSM assigns directly, not via addEventListener)
+  // ever sees it, instead of trying to undo whatever it does with it
+  // afterwards. This has no interaction with the real "Reset Lines"/"Reset
+  // Data" UI flows, which never go through a WebSocket message.
+  // === textfeed-reconnect-guard:start ===
   (function() {
-    var LINE_DATA_KEY = 'bannou-texthooker-lineData';
-    var TIME_VALUE_KEY = 'bannou-texthooker-timeValue';
-    var RECONCILE_GUARD_MS = 3000;
-    var reconcileWindowUntil = 0;
+    var onmessageDescriptor = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage');
+    if (!onmessageDescriptor || !onmessageDescriptor.set) return;
 
-    var origSend = WebSocket.prototype.send;
-    WebSocket.prototype.send = function(data) {
-      if (typeof data === 'string' && data.indexOf('"text_v2_snapshot_request"') !== -1) {
-        reconcileWindowUntil = Date.now() + RECONCILE_GUARD_MS;
-      }
-      return origSend.apply(this, arguments);
-    };
+    function isEmptyTextV2Snapshot(raw) {
+      if (typeof raw !== 'string') return false;
+      var data;
+      try { data = JSON.parse(raw); } catch (e) { return false; }
+      return !!data && data.event === 'text_v2_snapshot' &&
+        (!Array.isArray(data.lines) || data.lines.length === 0);
+    }
 
-    var origSetItem = Storage.prototype.setItem;
-    Storage.prototype.setItem = function(key, value) {
-      if (key === LINE_DATA_KEY && value === '[]' && Date.now() < reconcileWindowUntil) {
-        var previousLines = window.localStorage.getItem(LINE_DATA_KEY);
-        var timerValue = window.localStorage.getItem(TIME_VALUE_KEY);
-        var hadLines = !!previousLines && previousLines !== '[]';
-        var timerActive = !!timerValue && parseFloat(timerValue) > 0;
-        if (hadLines && timerActive) {
-          console.warn('[gsm-stream] Blocked TextFeed reconnect snapshot from clearing persisted lines (kanjieater/gsm-stream#6)');
-          return;
+    Object.defineProperty(WebSocket.prototype, 'onmessage', {
+      configurable: true,
+      enumerable: onmessageDescriptor.enumerable,
+      get: onmessageDescriptor.get,
+      set: function(handler) {
+        if (typeof handler !== 'function') {
+          return onmessageDescriptor.set.call(this, handler);
         }
-      }
-      return origSetItem.apply(this, arguments);
-    };
+        return onmessageDescriptor.set.call(this, function(event) {
+          if (isEmptyTextV2Snapshot(event && event.data)) {
+            console.warn('[gsm-stream] Dropped empty TextFeed v2 reconnect snapshot to avoid wiping persisted lines (kanjieater/gsm-stream#6)');
+            return;
+          }
+          return handler.apply(this, arguments);
+        });
+      },
+    });
   })();
+  // === textfeed-reconnect-guard:end ===
 
   // Keep the screen awake while the page is open.
   // Re-acquire on visibilitychange because the lock is released when the tab hides.
