@@ -5,9 +5,13 @@
 // prevent the live view from having already been cleared. The guard instead
 // rewrites the raw inbound message *before* GSM's handler computes anything
 // from it, so GSM's own (unmodified) reconciliation never enters its
-// destructive branch in the first place. It must never drop the message or
-// touch session_id -- GSM's session bookkeeping (current session id,
-// removed-line-id tracking) has to keep running exactly as GSM designed it.
+// destructive branch in the first place -- for a completely empty snapshot
+// or for a non-empty one that's merely shorter than the client's held
+// same-session history (server replay buffer expiry). It must never drop
+// the message or touch session_id -- GSM's session bookkeeping (current
+// session id, removed-line-id tracking) has to keep running exactly as GSM
+// designed it. Ids the guard adds back are marked expired/timed-out so GSM
+// never treats locally-preserved history as freshly active/replayable.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -143,11 +147,22 @@ function makeFakeGsmApp(localStorage) {
     setLineData([...retainedLines, ...syncedLines]);
   }
 
+  // GSM's own classification of each snapshot line into active vs.
+  // timed-out, driven purely by `state === 'expired'` on the wire object.
+  let lastClassification = { activeIds: [], timedOutIds: [] };
+  function classify(lines) {
+    return {
+      activeIds: lines.filter((l) => l.state !== 'expired' && typeof l.id === 'string').map((l) => l.id),
+      timedOutIds: lines.filter((l) => l.state === 'expired' && typeof l.id === 'string').map((l) => l.id),
+    };
+  }
+
   // GSM's own `socket.onmessage` handler for this event.
   function handleMessage(event) {
     const msg = JSON.parse(event.data);
     if (msg.event !== 'text_v2_snapshot') return;
     const lines = Array.isArray(msg.lines) ? msg.lines : [];
+    lastClassification = classify(lines);
     reconcile({
       sessionId: msg.session_id,
       orderedIds: lines.map((l) => l.id),
@@ -166,7 +181,15 @@ function makeFakeGsmApp(localStorage) {
     setLineData([]);
   }
 
-  return { mu, localStorage, handleMessage, resetLines, seedLineData, getCurrentSessionId: () => currentSessionId };
+  return {
+    mu,
+    localStorage,
+    handleMessage,
+    resetLines,
+    seedLineData,
+    getCurrentSessionId: () => currentSessionId,
+    getLastClassification: () => lastClassification,
+  };
 }
 
 test('empty snapshot: live store is never cleared, session bookkeeping still runs', () => {
@@ -219,6 +242,59 @@ test('reconnect preserves lines and new lines still append afterwards', () => {
     lines: [{ id: 'a', gsmSessionId: 's1' }, { id: 'b', gsmSessionId: 's1' }],
   }));
   assert.deepEqual(app.mu.value.map((l) => l.id).sort(), ['a', 'b'], 'new lines must still append');
+});
+
+test('partial snapshot after replay-buffer expiry: old persisted history remains', () => {
+  const { ws, localStorage } = installGuard();
+  const app = makeFakeGsmApp(localStorage);
+
+  // Client has three same-session lines locally, but the server's replay
+  // buffer has since aged out the two oldest ones.
+  app.seedLineData([
+    { id: 'a', gsmSessionId: 's1', text: 'first' },
+    { id: 'b', gsmSessionId: 's1', text: 'second' },
+    { id: 'c', gsmSessionId: 's1', text: 'third' },
+  ]);
+
+  ws.onmessage = app.handleMessage;
+  ws.dispatch(JSON.stringify({
+    event: 'text_v2_snapshot',
+    session_id: 's1',
+    lines: [{ id: 'c', gsmSessionId: 's1', text: 'third (confirmed)' }],
+  }));
+
+  assert.deepEqual(
+    app.mu.value.map((l) => l.id).sort(),
+    ['a', 'b', 'c'],
+    'lines outside the replay buffer must not be pruned just because a partial snapshot omitted them',
+  );
+});
+
+test('history preserved from a partial/empty snapshot stays timed_out, not active/replayable', () => {
+  const { ws, localStorage } = installGuard();
+  const app = makeFakeGsmApp(localStorage);
+
+  app.seedLineData([
+    { id: 'a', gsmSessionId: 's1', text: 'first' },
+    { id: 'b', gsmSessionId: 's1', text: 'second' },
+  ]);
+
+  ws.onmessage = app.handleMessage;
+  ws.dispatch(JSON.stringify({
+    event: 'text_v2_snapshot',
+    session_id: 's1',
+    lines: [{ id: 'b', gsmSessionId: 's1', text: 'second (confirmed)' }],
+  }));
+
+  const { activeIds, timedOutIds } = app.getLastClassification();
+  assert.deepEqual(timedOutIds, ['a'], 'locally-preserved history the guard added back must classify as timed-out');
+  assert.deepEqual(activeIds, ['b'], 'the real, server-confirmed line must stay active');
+
+  // Also cover the fully-empty case from the same angle.
+  ws.dispatch(JSON.stringify({ event: 'text_v2_snapshot', session_id: 's1', lines: [] }));
+  const afterEmpty = app.getLastClassification();
+  assert.deepEqual(afterEmpty.activeIds, [], 'nothing the guard adds back for an empty snapshot may be classified as active');
+  assert.deepEqual(afterEmpty.timedOutIds.sort(), ['a', 'b'], 'both preserved lines must classify as timed-out');
 });
 
 test('reload -> empty snapshot -> Trash/Reset Lines -> later non-empty snapshot: removed lines do not return', () => {

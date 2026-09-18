@@ -15,19 +15,29 @@
   // been cleared. The fix has to happen before GSM computes a sync plan
   // from this event at all.
   //
+  // The same bug also fires for a non-empty but *partial* snapshot: if the
+  // server's replay buffer has aged out some older same-session lines, its
+  // response only lists the ids it still has -- but GSM's reconciliation
+  // still treats every locally-held same-session id as "requested", so
+  // whatever wasn't in this shorter response gets pruned as if it were
+  // confirmed gone, even though it's simply outside the replay window.
+  //
   // GSM's handling of this same event also does session bookkeeping that
-  // must keep running even when the snapshot is empty: it records the
+  // must keep running for every snapshot, empty or not: it records the
   // current session id and resets the per-session removed-line-id tracking
   // used to stop locally-deleted lines from reappearing on resync. So this
-  // must never drop the message or touch its `session_id` -- it only
-  // rewrites an empty `lines` payload into one that re-lists the ids GSM
-  // already has locally for that session, steering GSM's own (unmodified)
+  // must never drop the message or touch its `session_id` -- it only adds
+  // back, to the `lines` payload, whatever locally-held same-session ids
+  // the server's response is missing, steering GSM's own (unmodified)
   // reconciliation into its normal merge path instead of the branch that
-  // (buggily) treats every existing same-session line as "requested but not
-  // returned". GSM reads the actual line content for those ids straight out
-  // of its own still-intact live store, so this never fabricates data, and
-  // its real removed-line filtering still applies to whatever ids are
-  // listed here.
+  // (buggily) treats them as "requested but not returned". Real entries the
+  // server did return are passed through completely unmodified. The ids we
+  // add back are marked `state: 'expired'` so GSM classifies them as
+  // timed-out history outside the replay buffer, not as freshly
+  // active/replayable lines -- GSM still reads their actual content
+  // straight out of its own still-intact live store, so this never
+  // fabricates line data, and its real removed-line filtering still
+  // applies to whatever ids are listed here.
   // === textfeed-reconnect-guard:start ===
   (function() {
     var LINE_DATA_KEY = 'bannou-texthooker-lineData';
@@ -38,16 +48,24 @@
 
     function buildSnapshotRewrite(data) {
       if (!data || data.event !== 'text_v2_snapshot') return null;
-      if (Array.isArray(data.lines) && data.lines.length > 0) return null;
       var sessionId = typeof data.session_id === 'string' ? data.session_id : '';
       var currentLines = parseJSON(window.localStorage.getItem(LINE_DATA_KEY), []);
       if (!Array.isArray(currentLines)) return null;
-      var sameSessionIds = currentLines
-        .filter(function(line) { return line && line.gsmSessionId === sessionId && typeof line.id === 'string'; })
+      var incomingLines = Array.isArray(data.lines) ? data.lines : [];
+      var incomingIds = {};
+      incomingLines.forEach(function(line) {
+        if (line && typeof line.id === 'string') incomingIds[line.id] = true;
+      });
+      var missingSameSessionIds = currentLines
+        .filter(function(line) {
+          return line && line.gsmSessionId === sessionId && typeof line.id === 'string' && !incomingIds[line.id];
+        })
         .map(function(line) { return line.id; });
-      if (!sameSessionIds.length) return null;
+      if (!missingSameSessionIds.length) return null;
       return Object.assign({}, data, {
-        lines: sameSessionIds.map(function(id) { return { id: id }; }),
+        lines: incomingLines.concat(missingSameSessionIds.map(function(id) {
+          return { id: id, state: 'expired' };
+        })),
       });
     }
 
