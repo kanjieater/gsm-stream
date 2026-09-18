@@ -9,35 +9,46 @@
   // the separately-stored timer keeps running untouched.
   // See kanjieater/gsm-stream#6.
   //
+  // GSM mutates its live `lineData$` store before its persistence
+  // subscriber ever writes localStorage, so anything that only reacts to the
+  // localStorage write is already too late -- the live view has already
+  // been cleared. The fix has to happen before GSM computes a sync plan
+  // from this event at all.
+  //
   // GSM's handling of this same event also does session bookkeeping that
   // must keep running even when the snapshot is empty: it records the
   // current session id and resets the per-session removed-line-id tracking
   // used to stop locally-deleted lines from reappearing on resync. So this
-  // must never drop or rewrite the message itself -- only observe it, and
-  // suppress the one resulting write that is actually wrong: GSM persisting
-  // an empty line list to localStorage when it still had real lines.
+  // must never drop the message or touch its `session_id` -- it only
+  // rewrites an empty `lines` payload into one that re-lists the ids GSM
+  // already has locally for that session, steering GSM's own (unmodified)
+  // reconciliation into its normal merge path instead of the branch that
+  // (buggily) treats every existing same-session line as "requested but not
+  // returned". GSM reads the actual line content for those ids straight out
+  // of its own still-intact live store, so this never fabricates data, and
+  // its real removed-line filtering still applies to whatever ids are
+  // listed here.
   // === textfeed-reconnect-guard:start ===
   (function() {
     var LINE_DATA_KEY = 'bannou-texthooker-lineData';
-    var suppressEmptyWipe = false;
 
-    function isEmptyTextV2Snapshot(raw) {
-      if (typeof raw !== 'string') return false;
-      var data;
-      try { data = JSON.parse(raw); } catch (e) { return false; }
-      return !!data && data.event === 'text_v2_snapshot' &&
-        (!Array.isArray(data.lines) || data.lines.length === 0);
+    function parseJSON(raw, fallback) {
+      try { return JSON.parse(raw); } catch (e) { return fallback; }
     }
 
-    function armSuppression() {
-      suppressEmptyWipe = true;
-      // GSM's reconciliation defers its write behind a single
-      // `setTimeout(fn, 0)` macrotask. Two nested zero-delay timeouts
-      // comfortably outlast that, then disarm automatically so this can
-      // never suppress an unrelated future write.
-      setTimeout(function() {
-        setTimeout(function() { suppressEmptyWipe = false; }, 0);
-      }, 0);
+    function buildSnapshotRewrite(data) {
+      if (!data || data.event !== 'text_v2_snapshot') return null;
+      if (Array.isArray(data.lines) && data.lines.length > 0) return null;
+      var sessionId = typeof data.session_id === 'string' ? data.session_id : '';
+      var currentLines = parseJSON(window.localStorage.getItem(LINE_DATA_KEY), []);
+      if (!Array.isArray(currentLines)) return null;
+      var sameSessionIds = currentLines
+        .filter(function(line) { return line && line.gsmSessionId === sessionId && typeof line.id === 'string'; })
+        .map(function(line) { return line.id; });
+      if (!sameSessionIds.length) return null;
+      return Object.assign({}, data, {
+        lines: sameSessionIds.map(function(id) { return { id: id }; }),
+      });
     }
 
     var onmessageDescriptor = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage');
@@ -51,28 +62,19 @@
             return onmessageDescriptor.set.call(this, handler);
           }
           return onmessageDescriptor.set.call(this, function(event) {
-            if (isEmptyTextV2Snapshot(event && event.data)) {
-              armSuppression();
+            var raw = event && event.data;
+            if (typeof raw === 'string') {
+              var rewritten = buildSnapshotRewrite(parseJSON(raw, null));
+              if (rewritten) {
+                console.warn('[gsm-stream] Rewrote empty TextFeed v2 reconnect snapshot to avoid wiping persisted lines (kanjieater/gsm-stream#6)');
+                return handler.call(this, { data: JSON.stringify(rewritten) });
+              }
             }
-            // Always deliver the message -- GSM's own session bookkeeping
-            // for this event must still run.
             return handler.apply(this, arguments);
           });
         },
       });
     }
-
-    var origSetItem = Storage.prototype.setItem;
-    Storage.prototype.setItem = function(key, value) {
-      if (key === LINE_DATA_KEY && value === '[]' && suppressEmptyWipe) {
-        var previous = window.localStorage.getItem(LINE_DATA_KEY);
-        if (previous && previous !== '[]') {
-          console.warn('[gsm-stream] Blocked TextFeed reconnect snapshot from clearing persisted lines (kanjieater/gsm-stream#6)');
-          return;
-        }
-      }
-      return origSetItem.apply(this, arguments);
-    };
   })();
   // === textfeed-reconnect-guard:end ===
 

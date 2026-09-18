@@ -1,10 +1,13 @@
 // Regression tests for kanjieater/gsm-stream#6.
 //
-// The guard must never drop or rewrite a `text_v2_snapshot` message -- GSM's
-// own handler always has to run so its session bookkeeping (current session
-// id, removed-line-id tracking) stays correct. It should only suppress the
-// one resulting localStorage write that is actually wrong: persisting an
-// empty line list when real lines existed.
+// GSM mutates its live lineData$ store before its persistence subscriber
+// writes localStorage, so nothing that reacts to the localStorage write can
+// prevent the live view from having already been cleared. The guard instead
+// rewrites the raw inbound message *before* GSM's handler computes anything
+// from it, so GSM's own (unmodified) reconciliation never enters its
+// destructive branch in the first place. It must never drop the message or
+// touch session_id -- GSM's session bookkeeping (current session id,
+// removed-line-id tracking) has to keep running exactly as GSM designed it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -28,70 +31,64 @@ const guardSrc = extractGuard(headerUiSrc);
 const LINE_DATA_KEY = 'bannou-texthooker-lineData';
 const REMOVED_IDS_KEY = 'bannou-texthooker-removedGSMLineIds';
 
-// Minimal WebSocket/Storage stand-ins exposing `onmessage` and `setItem` as
-// prototype members the guard's Object.getOwnPropertyDescriptor lookups and
-// monkeypatches depend on, matching the real browser contracts GSM and the
-// guard both rely on. These classes are defined in this realm and shared
-// into the vm context so the guard's patches (applied inside the vm) mutate
-// the same prototype objects this file's fake app uses outside it.
-class FakeWebSocket {
-  constructor() { this._onmessage = null; }
-  dispatch(data) { if (this._onmessage) this._onmessage({ data }); }
-}
-Object.defineProperty(FakeWebSocket.prototype, 'onmessage', {
-  configurable: true,
-  enumerable: true,
-  get() { return this._onmessage; },
-  set(handler) { this._onmessage = handler; },
-});
-
-class FakeStorage {
-  constructor() { this._backing = new Map(); }
-  getItem(k) { return this._backing.has(k) ? this._backing.get(k) : null; }
-  setItem(k, v) { this._backing.set(k, String(v)); }
-}
-
+// Fresh WebSocket/Storage stand-ins per test, each exposing `onmessage`/
+// storage members the guard's Object.getOwnPropertyDescriptor lookup and
+// monkeypatch depend on, matching the real browser contract. A fresh class
+// per call means each test's guard installation gets a pristine, unpatched
+// prototype -- otherwise later tests would double-wrap a prototype already
+// patched by an earlier test.
 function installGuard() {
-  const sandbox = { WebSocket: FakeWebSocket, Storage: FakeStorage, console, setTimeout, clearTimeout };
+  class FakeWebSocket {
+    constructor() { this._onmessage = null; }
+    dispatch(data) { if (this._onmessage) this._onmessage({ data }); }
+  }
+  Object.defineProperty(FakeWebSocket.prototype, 'onmessage', {
+    configurable: true,
+    enumerable: true,
+    get() { return this._onmessage; },
+    set(handler) { this._onmessage = handler; },
+  });
+
+  class FakeStorage {
+    constructor() { this._backing = new Map(); }
+    getItem(k) { return this._backing.has(k) ? this._backing.get(k) : null; }
+    setItem(k, v) { this._backing.set(k, String(v)); }
+  }
+
   const localStorage = new FakeStorage();
-  sandbox.window = { localStorage };
+  const sandbox = { WebSocket: FakeWebSocket, console, window: { localStorage } };
   vm.createContext(sandbox);
   vm.runInContext(guardSrc, sandbox);
   return { ws: new FakeWebSocket(), localStorage };
 }
 
-// Reimplements just enough of GSM's own session-sync pipeline (session-sync.ts,
-// reverse-engineered from the shipped bundle) to exercise the real bug and the
-// bookkeeping the fix must preserve: current-session tracking (`A`),
-// per-session removed-line-id tracking (`Vt`/`N`/`et`/`tt`), and the plan
-// builder (`Ju`) whose first loop excludes ids already recorded as removed.
+// Reimplements just enough of GSM's own session-sync pipeline (reverse
+// engineered from the shipped bundle) to exercise the real bug and the
+// bookkeeping the fix must preserve: current-session tracking, per-session
+// removed-line-id tracking (whose first loop excludes ids already recorded
+// as removed), and GSM's documented mutation order -- the live store changes
+// first, and persistence is a separate, secondary step.
 function makeFakeGsmApp(localStorage) {
   const mu = { value: [] };
 
-  // Matches the observed real-world result (confirmed against the live app):
-  // blocking the localStorage write also prevents the live value from
-  // flipping to empty, because the persisted store's `set` re-derives its
-  // in-memory value from what's actually in storage rather than trusting the
-  // caller's value directly.
   function setLineData(value) {
-    localStorage.setItem(LINE_DATA_KEY, JSON.stringify(value));
-    mu.value = JSON.parse(localStorage.getItem(LINE_DATA_KEY));
+    mu.value = value; // live BehaviorSubject changes first
+    localStorage.setItem(LINE_DATA_KEY, JSON.stringify(value)); // persistence second
   }
 
   function seedLineData(lines) {
-    mu.value = lines;
-    localStorage.setItem(LINE_DATA_KEY, JSON.stringify(lines));
+    setLineData(lines);
   }
 
-  let currentSessionId = null; // `A`
-  let removedIdsSessionId = null; // `et`
-  let removedIds = new Set(); // `tt`
+  let currentSessionId = null;
+  let removedIdsSessionId = null;
+  let removedIds = new Set();
 
   function persistRemovedIds() {
     localStorage.setItem(REMOVED_IDS_KEY, JSON.stringify([...removedIds]));
   }
 
-  function onSessionObserved(sessionId) { // `Vt`
+  function onSessionObserved(sessionId) {
     if (removedIdsSessionId !== sessionId) {
       removedIdsSessionId = sessionId;
       removedIds = new Set();
@@ -99,7 +96,7 @@ function makeFakeGsmApp(localStorage) {
     }
   }
 
-  function recordRemoved(lines) { // `N`
+  function recordRemoved(lines) {
     if (!currentSessionId) return;
     let changed = false;
     for (const line of lines) {
@@ -111,13 +108,15 @@ function makeFakeGsmApp(localStorage) {
     if (changed) persistRemovedIds();
   }
 
-  function buildSyncPlan(evt, currentLines) { // `Ju`
+  function buildSyncPlan(evt, currentLines) {
     const orderedIds = new Set(evt.orderedIds);
     const requestedIds = new Set(evt.requestedIds);
     const byId = new Map(currentLines.map((l) => [l.id, l]));
     const synced = [];
     for (const id of new Set(evt.orderedIds)) {
       if (removedIds.has(id)) continue;
+      // GSM reads full line content for a requested id from its own
+      // still-intact live store when it has it locally.
       synced.push(byId.get(id) || { id, gsmSessionId: evt.sessionId, text: '(from server)' });
     }
     const retained = [];
@@ -129,15 +128,15 @@ function makeFakeGsmApp(localStorage) {
     return { syncedLines: synced, retainedLines: retained };
   }
 
-  function reconcile(evt) { // `Lt`
+  function reconcile(evt) {
     if (!evt.sessionId) return;
     currentSessionId = evt.sessionId;
     onSessionObserved(evt.sessionId);
     const { syncedLines, retainedLines } = buildSyncPlan(evt, mu.value);
     if (!syncedLines.length) {
-      // Upstream's buggy branch: fires for every empty snapshot even though
-      // `retainedLines` is wrong when `requestedIds` was polluted with every
-      // existing same-session id (the actual root cause of #6).
+      // Upstream's buggy branch: fires whenever nothing was returned, even
+      // though `retainedLines` is wrong when `requestedIds` was polluted
+      // with every existing same-session id (the actual root cause of #6).
       setLineData(retainedLines);
       return;
     }
@@ -158,18 +157,19 @@ function makeFakeGsmApp(localStorage) {
     });
   }
 
-  // gsm-stream's "Reset Lines" header button automates GSM's native "Reset
-  // Data" flow: it records the visible same-session lines as removed (so a
-  // later resync can't bring them back), then clears the store.
+  // gsm-stream's "Trash"/"Reset Lines" header button automates GSM's native
+  // "Reset Data" flow: it records the visible same-session lines as removed
+  // (so a later resync can't bring them back), then clears the store. This
+  // never goes through a WebSocket message, so the guard cannot affect it.
   function resetLines() {
     recordRemoved(mu.value.filter((l) => l.gsmSessionId === currentSessionId));
     setLineData([]);
   }
 
-  return { mu, handleMessage, resetLines, seedLineData, getCurrentSessionId: () => currentSessionId };
+  return { mu, localStorage, handleMessage, resetLines, seedLineData, getCurrentSessionId: () => currentSessionId };
 }
 
-test('empty snapshot: session bookkeeping still runs, only the destructive write is suppressed', () => {
+test('empty snapshot: live store is never cleared, session bookkeeping still runs', () => {
   const { ws, localStorage } = installGuard();
   const app = makeFakeGsmApp(localStorage);
   app.seedLineData([{ id: 'a', gsmSessionId: 's1', text: 'hello' }]);
@@ -183,7 +183,7 @@ test('empty snapshot: session bookkeeping still runs, only the destructive write
     JSON.stringify([]),
     'removed-ids bookkeeping for the session must still be initialized',
   );
-  assert.deepEqual(app.mu.value, [{ id: 'a', gsmSessionId: 's1', text: 'hello' }]);
+  assert.deepEqual(app.mu.value, [{ id: 'a', gsmSessionId: 's1', text: 'hello' }], 'live store must never go empty');
   assert.equal(
     localStorage.getItem(LINE_DATA_KEY),
     JSON.stringify([{ id: 'a', gsmSessionId: 's1', text: 'hello' }]),
@@ -191,31 +191,37 @@ test('empty snapshot: session bookkeeping still runs, only the destructive write
   );
 });
 
-test('non-empty snapshot still merges normally', () => {
+test('empty snapshot with no local history is left untouched', () => {
+  const { ws, localStorage } = installGuard();
+  const app = makeFakeGsmApp(localStorage);
+
+  ws.onmessage = app.handleMessage;
+  ws.dispatch(JSON.stringify({ event: 'text_v2_snapshot', session_id: 's1', lines: [] }));
+
+  assert.equal(app.getCurrentSessionId(), 's1');
+  assert.deepEqual(app.mu.value, []);
+});
+
+test('reconnect preserves lines and new lines still append afterwards', () => {
   const { ws, localStorage } = installGuard();
   const app = makeFakeGsmApp(localStorage);
   app.seedLineData([{ id: 'a', gsmSessionId: 's1', text: 'hello' }]);
 
   ws.onmessage = app.handleMessage;
+  ws.dispatch(JSON.stringify({ event: 'text_v2_snapshot', session_id: 's1', lines: [] }));
+  assert.deepEqual(app.mu.value.map((l) => l.id), ['a'], 'existing line must survive the reconnect');
+
+  // A later, genuinely non-empty snapshot must still merge in new content
+  // normally -- the guard must not interfere with real snapshots at all.
   ws.dispatch(JSON.stringify({
     event: 'text_v2_snapshot',
     session_id: 's1',
     lines: [{ id: 'a', gsmSessionId: 's1' }, { id: 'b', gsmSessionId: 's1' }],
   }));
-
-  assert.deepEqual(app.mu.value.map((l) => l.id).sort(), ['a', 'b']);
+  assert.deepEqual(app.mu.value.map((l) => l.id).sort(), ['a', 'b'], 'new lines must still append');
 });
 
-function flushGuardWindow() {
-  // The guard's suppression window spans two nested zero-delay timeouts;
-  // give it real elapsed macrotasks to clear, matching how far apart these
-  // events actually are in a live browser (a user's Reset Lines click always
-  // happens well after any reconnect-triggered snapshot has finished
-  // processing, not in the same tick).
-  return new Promise((resolve) => setTimeout(() => setTimeout(() => setTimeout(resolve, 0), 0), 0));
-}
-
-test('reload -> empty snapshot -> Reset Lines -> later non-empty snapshot: removed lines do not return', async () => {
+test('reload -> empty snapshot -> Trash/Reset Lines -> later non-empty snapshot: removed lines do not return', () => {
   const { ws, localStorage } = installGuard();
   const app = makeFakeGsmApp(localStorage);
 
@@ -229,17 +235,20 @@ test('reload -> empty snapshot -> Reset Lines -> later non-empty snapshot: remov
 
   // Reconnect after reload: client is already caught up, server sends an
   // empty snapshot. Without the fix this wipes the lines; with it, both
-  // the persisted and live lines must survive.
+  // the live and persisted lines must survive.
   ws.dispatch(JSON.stringify({ event: 'text_v2_snapshot', session_id: 's1', lines: [] }));
   assert.deepEqual(app.mu.value.map((l) => l.id).sort(), ['a', 'b'], 'lines must survive the reconnect');
 
-  // User clicks "Reset Lines" sometime later, well after the reconnect's
-  // own snapshot processing has finished. This only does the right thing
+  // User clicks Trash/Reset Lines. This only does the right thing
   // (permanently excludes these ids from future resyncs) if session
   // bookkeeping was kept intact by the fix above.
-  await flushGuardWindow();
   app.resetLines();
-  assert.deepEqual(app.mu.value, []);
+  assert.deepEqual(app.mu.value, [], 'trash must clear the live store');
+  assert.equal(
+    localStorage.getItem(LINE_DATA_KEY),
+    JSON.stringify([]),
+    'trash must clear the persisted store',
+  );
   assert.deepEqual(
     JSON.parse(localStorage.getItem(REMOVED_IDS_KEY)).sort(),
     ['a', 'b'],
@@ -261,19 +270,16 @@ test('reload -> empty snapshot -> Reset Lines -> later non-empty snapshot: remov
   assert.deepEqual(
     app.mu.value.map((l) => l.id),
     ['c'],
-    'lines removed via Reset Lines must not reappear from a later resync',
+    'lines removed via Trash/Reset Lines must not reappear from a later resync',
   );
 });
 
 test('unrelated events pass through untouched', () => {
-  const { ws, localStorage } = installGuard();
-  const app = makeFakeGsmApp(localStorage);
-  app.seedLineData([{ id: 'a', gsmSessionId: 's1', text: 'hello' }]);
+  const { ws } = installGuard();
   let appendCalls = 0;
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.event === 'text_v2_append') appendCalls += 1;
-    else app.handleMessage(event);
   };
 
   ws.dispatch(JSON.stringify({ event: 'text_v2_append', data: { id: 'c' } }));
