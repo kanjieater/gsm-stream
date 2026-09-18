@@ -1,10 +1,25 @@
-# Instance 2: staged GSM 2026.9.2 upgrade (not deployment-ready)
+# Instance 2: GSM 2026.9.2 upgrade (promoted to default)
 
-## Scope and safety
+## Status: promoted
 
-Only the second instance is a candidate. Do not restart, redeploy, retag, or
+GSM 2026.9.2 is now the Dockerfile's default `GSM_VERSION`, so the CI-published
+`:latest` image (and both live instances, once redeployed from it) run 2026.9.2.
+This section below was written while 2026.9.2 was still an instance-2-only
+opt-in build; it's kept as the record of what was and wasn't validated before
+promotion. Formally executed: the six offline contract tests, the Anki-thread
+compat fix, a DB/config migration integrity check, and extended real-world use
+on the instance-2 candidate across multiple live game sessions (including
+reconnect/TextFeed behavior). **Not** formally executed as separate gated
+steps before promotion: a dedicated benchmark of representative frames against
+the old image, and a scripted disposable-Anki-profile card-creation check (list
+item 5/6 below). Treat those as outstanding follow-up, not as blocking this
+promotion.
+
+## Historical scope and safety (pre-promotion)
+
+Only the second instance was a candidate. Do not restart, redeploy, retag, or
 change the primary service. Do not use the existing deploy-both script.
-The default Docker build remains GSM 2026.7.1; the candidate is opt-in:
+The default Docker build remained GSM 2026.7.1; the candidate was opt-in:
 
 ```sh
 docker build --build-arg GSM_VERSION=2026.9.2 -t gsm-stream-candidate:2026.9.2 .
@@ -18,9 +33,9 @@ bridge/GSM. `GSM_TEST_ISOLATED=1` is an explicit attestation, not a sandbox:
 use it only in a disposable container without real GSM state mounted. Do not
 set it on the host. `PROFILES_CONFIG` alone does not isolate GSM's config/DB.
 
-The ordinary PR image remains on 2026.7.1. The upgrade-contracts workflow builds
-both releases without publishing or deploying the candidate. Do not repoint
-any `latest` tag to the candidate. Use an immutable image reference at rollout.
+The ordinary PR image remained on 2026.7.1 at the time this was written. The
+upgrade-contracts workflow still builds both releases in CI as regression
+coverage for the older release.
 
 ## Confirmed compatibility fix
 
