@@ -1,4 +1,44 @@
 (function() {
+  // GSM 2026.9.2's TextFeed v2 reconnect flow can wipe persisted lines while
+  // leaving the timer untouched: on reconnect it sends `text_v2_snapshot_request`
+  // with `after_sequence` set to the highest locally-known sequence, and if the
+  // client is already caught up the server replies with an empty snapshot.
+  // The client's session-reconciliation logic then treats every existing
+  // same-session line as "requested but not returned" and prunes them all,
+  // overwriting `bannou-texthooker-lineData` with `[]` in localStorage.
+  // See kanjieater/gsm-stream#6. Guard only within a short window after that
+  // specific request is sent, so it never interferes with the real "Reset Data"
+  // button (which clears the timer too).
+  (function() {
+    var LINE_DATA_KEY = 'bannou-texthooker-lineData';
+    var TIME_VALUE_KEY = 'bannou-texthooker-timeValue';
+    var RECONCILE_GUARD_MS = 3000;
+    var reconcileWindowUntil = 0;
+
+    var origSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function(data) {
+      if (typeof data === 'string' && data.indexOf('"text_v2_snapshot_request"') !== -1) {
+        reconcileWindowUntil = Date.now() + RECONCILE_GUARD_MS;
+      }
+      return origSend.apply(this, arguments);
+    };
+
+    var origSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (key === LINE_DATA_KEY && value === '[]' && Date.now() < reconcileWindowUntil) {
+        var previousLines = window.localStorage.getItem(LINE_DATA_KEY);
+        var timerValue = window.localStorage.getItem(TIME_VALUE_KEY);
+        var hadLines = !!previousLines && previousLines !== '[]';
+        var timerActive = !!timerValue && parseFloat(timerValue) > 0;
+        if (hadLines && timerActive) {
+          console.warn('[gsm-stream] Blocked TextFeed reconnect snapshot from clearing persisted lines (kanjieater/gsm-stream#6)');
+          return;
+        }
+      }
+      return origSetItem.apply(this, arguments);
+    };
+  })();
+
   // Keep the screen awake while the page is open.
   // Re-acquire on visibilitychange because the lock is released when the tab hides.
   var _wakeLock = null;
